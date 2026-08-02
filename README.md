@@ -12,5 +12,5 @@ The idea is that the container is a kind of throwaway sandbox in which we can co
 
 - Clone this repo 
 - From here build the image (`make build`)
-- Take `agent.sh` and put it somewhere on `$PATH`. 
-- The idea of `agent.sh` is that it gives a set of commands which put a new `clanker-cage` into the current project directory. So `cd to/where/project/is && agent up && agent attach` is the intended workflow.
+- Take `clanker.sh` and copy it somewhere so that its on `$PATH`. 
+- The idea of `clanker.sh` is that it gives a set of commands which put a new `clanker-cage` into the current project directory. So `cd to/where/project/is && clanker up && clanker attach` is the intended workflow.
