@@ -60,13 +60,6 @@ SECURITY_FLAGS := \
   --cpus $(CPUS) \
   --network $(NETWORK)
 
-MOUNT_FLAGS := \
-  -v $(PROJECT_DIR):$(PROJECT_DIR) \
-  -v $(STATE_VOL):/home/agent/.claude \
-  -v $(CACHE_VOL):/home/agent/.cache \
-  -v $(HOME)/.claude/skills:/home/agent/.claude/skills:ro \
-  -w $(PROJECT_DIR)
-
 # CLAUDE_CODE_OAUTH_TOKEN is passed by name only: the value is inherited from
 # your shell at run time and never baked into an image layer.
 ENV_FLAGS := \
@@ -76,7 +69,7 @@ ENV_FLAGS := \
   -e CARGO_HOME=/home/agent/.cache/cargo \
   -e TERM=$(TERM)
 
-RUN_FLAGS := $(SECURITY_FLAGS) $(MOUNT_FLAGS) $(ENV_FLAGS)
+RUN_FLAGS := $(SECURITY_FLAGS)  $(ENV_FLAGS)
 
 # --- build -----------------------------------------------------------------
 
@@ -133,21 +126,11 @@ down:  ## Stop and remove the long-lived container
 .PHONY: restart
 restart: down up  ## Recycle the long-lived container
 
-.PHONY: exec
-exec: require-running  ## Join the running container with a shell
-	$(DOCKER) exec -i $(TTY) -w $(PROJECT_DIR) $(NAME) bash
-
 .PHONY: attach
 attach: require-running  ## Join the running container with a Claude session
 	$(DOCKER) exec -i $(TTY) -w $(PROJECT_DIR) $(NAME) claude
 
 # --- headless --------------------------------------------------------------
-
-.PHONY: task
-task: build check-auth  ## Headless run:  make task PROMPT="..."
-	@test -n "$(PROMPT)" || { echo "error: set PROMPT=\"...\""; exit 2; }
-	$(DOCKER) run --rm -i $(RUN_FLAGS) $(IMAGE_REF) \
-	  claude -p "$(PROMPT)" --output-format stream-json --verbose
 
 # --- inspection ------------------------------------------------------------
 
