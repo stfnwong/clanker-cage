@@ -11,7 +11,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       python3 python3-venv pipx ripgrep jq gdb npm\
  && rm -rf /var/lib/apt/lists/*
 
-RUN groupadd -g ${GID} ${USERNAME} && useradd -m -u ${UID} -g ${GID} ${USERNAME}
+RUN if ! getent group "$GID" >/dev/null; then groupadd -g "$GID" "$USERNAME"; fi \
+	&& useradd -o -m -u "$UID" -g "$GID" "$USERNAME" \
+	&& mkdir -p /home/"$USERNAME"/.claude /home/"$USERNAME"/.cache /project \
+	&& chown -R "$UID:$GID" /home/"$USERNAME"
+
+#RUN groupadd -g ${GID} ${USERNAME} && useradd -m -u ${UID} -g ${GID} ${USERNAME}
 
 # rust for linear_mercatoria
 RUN curl --proto '=https' -fsSL https://sh.rustup.rs | sh -s -- -y --default-toolchain 1.xx

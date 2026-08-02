@@ -12,5 +12,5 @@ The idea is that the container is a kind of throwaway sandbox in which we can co
 
 - Clone this repo 
 - From here build the image (`make build`)
-- Take `clanker` and copy it somewhere so that its on `$PATH`. 
+- Take `clanker` and copy it somewhere so that its on `$PATH`, perhaps somewhere like `/usr/local/bin`, or `~/.local/bin`.
 - The idea of `clanker` is that it gives a set of commands which put a new `clanker-cage` into the current project directory. So `cd to/where/project/is && clanker up && clanker attach` is the intended workflow.
