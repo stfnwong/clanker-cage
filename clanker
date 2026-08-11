@@ -79,7 +79,7 @@ mounts=(
   mounts+=( -v "$HOME/.claude/skills:/home/clanker/.claude/skills:ro" )
 
 env_=(
-  -e CLAUDE_CODE_OAUTH_TOKEN          # value inherited, never baked in
+  -e ANTHROPIC_API_KEY
   -e HOME=/home/clanker
   -e "PROJECT_DIR=${PROJECT_DIR}"
   -e CCACHE_DIR=/home/clanker/.cache/ccache
@@ -87,13 +87,43 @@ env_=(
   -e "TERM=${TERM:-xterm-256color}"
 )
 
+# Credentials 
+# For Claude specifically ANTHROPIC_API_KEY is ranked higher than CLAUDE_OAUTH_TOKEN
+# so if both are passed the key wins, and the console is billed instead of the 
+# subscription.
+AUTH=${AGENT_AUTH:-auto}
+API_KEY_FILE=${AGENT_API_KEY_FILE:-$HOME/.config/anthropic/api-key}
+
+creds=()
+case "$AUTH" in 
+	oauth)
+		[[ -n ${CLAUDE_CODE_OAUTH_TOKEN:-} ]] || die "AGENT_AUTH=oauth but no token set"
+		creds=( -e CLAUDE_CODE_OAUTH_TOKEN )
+		;;
+	api)
+		if [[ -z ${ANTHROPIC_API_KEY:-} && -r $API_KEY_FILE ]]; then 
+			ANTHROPIC_API_KEY=$(<"$API_KEY_FILE"); export ANTHROPIC_API_KEY
+		fi
+		[[ -n ${ANTHROPIC_API_KEY:-} ]] | die "AGENT_AUTH=api but no key found"
+		creds=( -e ANTHROPIC_API_KEY )   # name only, value never hits arg
+		;;
+	auto)
+		if   [[ -n ${CLAUDE_CODE_OAUTH_TOKEN:-} ]]; then creds=( -e CLAUDE_CODE_OAUTH_TOKEN )
+		elif [[ -n ${ANTHROPIC_API_KEY:-} ]]; then creds=( -e ANTHROPIC_API_KEY )
+		fi
+		;;
+	*) die "AGENT_AUTH must be auto, api, or oauth" ;;
+esac
+
+
+# Other flags 
 user_flags=()
 case "$(uname -s)" in
   Linux)  user_flags=( --user "$(id -u):$(id -g)" ) ;;
   Darwin) : ;;   # virtiofs translates ownership; forcing --user hurts
 esac
 
-run_flags=( "${security[@]}" "${mounts[@]}" "${env_[@]}" "${user_flags[@]}")
+run_flags=( "${security[@]}" "${mounts[@]}" "${env_[@]}" "${user_flags[@]}" "${creds[@]}")
 
 running() { [[ -n "$($DOCKER ps -q -f "name=^${NAME}$")" ]]; }
 
