@@ -7,8 +7,38 @@ REGISTRY       ?= ghcr.io/your-username   # Set your default registry
 GIT_HASH       := $(shell git rev-parse --short HEAD 2>/dev/null || echo "unknown")
 DATE_TAG       := $(shell date +%Y%m%d)
 IMAGE_TAG      ?= $(DATE_TAG)-$(GIT_HASH)
-PLATFORM       ?= linux/amd64
 CONTAINER_TOOL ?= docker
+
+# Detect host operating system
+UNAME_S := $(shell uname -s)
+
+# Detect host architecture (optional)
+UNAME_M := $(shell uname -m)
+
+# Conditionally set variables based on OS
+ifeq ($(UNAME_S),Darwin)
+    CONTAINER_TOOL ?= docker          # Could also be podman with machine
+    MOUNT_OPTS   := :delegated
+    # On Apple Silicon, the default docker platform is linux/arm64
+    # PLATFORM?=linux/arm64            # if you want to enforce
+else ifeq ($(UNAME_S),Linux)
+    CONTAINER_TOOL ?= docker
+    MOUNT_OPTS   :=
+    # PLATFORM?=linux/amd64
+endif
+
+# If you want to auto-set PLATFORM based on architecture:
+# map uname -m to Docker platform (simplified)
+ifeq ($(UNAME_M),x86_64)
+    HOST_PLATFORM := linux/amd64
+else ifeq ($(UNAME_M),aarch64)
+    HOST_PLATFORM := linux/arm64
+else ifeq ($(UNAME_M),arm64)
+    HOST_PLATFORM := linux/arm64
+endif
+
+# Use the auto-detected PLATFORM unless overridden
+PLATFORM ?= $(HOST_PLATFORM)
 
 # ─── Build ───────────────────────────────────────────────────
 .PHONY: build
