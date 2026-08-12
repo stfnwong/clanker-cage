@@ -1,198 +1,143 @@
 #!/usr/bin/env bash
-# clanker — run a containerised Claude Code session against the current project.
-#
-#   clanker              ephemeral interactive session in this project
-#   clanker shell        ephemeral shell, no agent
-#   clanker up           long-lived container for this project
-#   clanker exec [cmd]   join the long-lived container (default: bash)
-#   clanker attach       join it with a Claude session
-#   clanker task "..."   headless one-shot, stream-json on stdout
-#   clanker down         stop and remove the long-lived container
-#   clanker ps           show container and volumes for this project
-#   clanker purge        delete this project's state volumes (destructive)
-#
-# The image is built elsewhere (see the tooling repo's Makefile). This script
-# only decides *what to mount* and *under what constraints*.
-
+# clanker - Drop into an isolated agent environment for the current project
 set -euo pipefail
 
+# ─── Configuration ───────────────────────────────────────────
+# This script lives in the clanker repo. It finds its own directory
+# to locate the Dockerfile and supporting files.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+IMAGE_TAG="clanker:latest"
+CONTAINER_NAME="clanker-$(date +%Y%m%d-%H%M%S)-$$"
 
-IMAGE=${AGENT_IMAGE:-clanker-cage:dev}
-DOCKER=${AGENT_DOCKER:-docker}
-NETWORK=${AGENT_NETWORK:-bridge}     # set to 'none' once a proxy exists
-MEMORY=${AGENT_MEMORY:-8g}
-CPUS=${AGENT_CPUS:-4}
-PIDS=${AGENT_PIDS:-256}
+# Paths that exist on the host
+PROJECT_ROOT="${CLANKER_PROJECT:-$(pwd)}"
+SKILLS_DIR="${CLANKER_SKILLS_DIR:-${PROJECT_ROOT}/.clanker}"
+GLOBAL_SKILLS="${SCRIPT_DIR}/skills"
+SECRETS_DIR="${CLANKER_SECRETS_DIR:-${HOME}/.config/clanker/secrets}"
+CLANKER_CACHE="${CLANKER_CACHE:-${HOME}/.cache/clanker}"
 
-die() { printf 'clanker: %s\n' "$*" >&2; exit 1; }
-
-# --- identify the project --------------------------------------------------
-# Prefer the git toplevel so `clanker` works from any subdirectory.
-PROJECT_DIR=$(git rev-parse --show-toplevel 2>/dev/null || pwd)
-PROJECT_DIR=$(cd "$PROJECT_DIR" && pwd -P)
-
-[[ "$PROJECT_DIR" == "$HOME" || "$PROJECT_DIR" == "/" ]] &&
-  die "refusing to mount $PROJECT_DIR; run from inside a project"
-
-# Path hash keeps two checkouts of the same repo (worktrees!) distinct.
-SLUG=$(basename "$PROJECT_DIR" | tr -c '[:alnum:]._-' '-' | cut -c1-32)
-
-if command -v sha1sum >/dev/null; then
-  HASH=$(printf '%s' "$PROJECT_DIR" | sha1sum | cut -c1-8)
-else
-  HASH=$(printf '%s' "$PROJECT_DIR" | shasum | cut -c1-8)
+# ─── Preflight ───────────────────────────────────────────────
+if [[ ! -d "${PROJECT_ROOT}" ]]; then
+    echo "Error: PROJECT_ROOT ${PROJECT_ROOT} does not exist" >&2
+    exit 1
 fi
 
-KEY="${SLUG}-${HASH}"
+if [[ ! -f "${PROJECT_ROOT}/.git" ]] && [[ ! -d "${PROJECT_ROOT}/.git" ]]; then
+    echo "Warning: Not a git repository. Proceeding anyway." >&2
+fi
 
-NAME="clanker-${KEY}"
-STATE_VOL="clanker-state-${KEY}"
-CACHE_VOL="clanker-cache-${KEY}"
+# ─── Build image if needed ───────────────────────────────────
+if [[ -z "$(docker images -q "${IMAGE_TAG}" 2>/dev/null)" ]]; then
+    echo "Building clanker image..." >&2
+    docker build -t "${IMAGE_TAG}" "${SCRIPT_DIR}"
+fi
 
-UID_=$(id -u); GID_=$(id -g)
-TTY_FLAG=(); [[ -t 1 ]] && TTY_FLAG=(-t)
+# ─── Prepare mounts ──────────────────────────────────────────
+# Create host directories if they don't exist
+mkdir -p "${CLANKER_CACHE}/pip"
+mkdir -p "${CLANKER_CACHE}/npm"
+mkdir -p "${SECRETS_DIR}"
 
-# --- flags -----------------------------------------------------------------
-security=(
-  --cap-drop ALL
-  --security-opt no-new-privileges
-  --read-only
-  --tmpfs /tmp:rw,nosuid,size=512m
-  --pids-limit "$PIDS"
-  --memory "$MEMORY"
-  --cpus "$CPUS"
-  --network "$NETWORK"
+# ─── Mount options ───────────────────────────────────────────
+# Add some basic Darwin support 
+
+if [[ "$(uname)" == "Darwin" ]]; then
+	MOUNT_OPTS=":delegated"
+else
+	MOUNT_OPTS=""
+fi
+
+MOUNTS=(
+    # Project: read-write so the agent can edit files
+    -v "${PROJECT_ROOT}:/workspace:rw${MOUNT_OPTS}"
+
+    # Package caches: persist between sessions
+    -v "${CLANKER_CACHE}/pip:/home/clanker/.cache/pip:rw"
+    -v "${CLANKER_CACHE}/npm:/home/clanker/.cache/npm:rw"
+
+    # Skills: project-specific override global
+    -v "${GLOBAL_SKILLS}:/etc/clanker/skills:ro"
 )
 
-mounts=(
-  # Same absolute path inside and out: compile_commands.json, backtraces and
-  # ccache entries stay valid on both sides of the boundary.
-  -v "${PROJECT_DIR}:${PROJECT_DIR}"
-  # Stable alias so skills and docs can say /project regardless of checkout.
-  -v "${PROJECT_DIR}:/project"
-  -v "${STATE_VOL}:/home/clanker/.claude"
-  -v "${CACHE_VOL}:/home/clanker/.cache"
-  -w "${PROJECT_DIR}"
+# If project has .clanker/skills, mount it over the global skills
+if [[ -d "${SKILLS_DIR}/skills" ]]; then
+    MOUNTS+=(-v "${SKILLS_DIR}/skills:/workspace/.clanker/skills:ro")
+fi
+
+# If project has .clanker/config, mount it
+if [[ -f "${SKILLS_DIR}/config" ]]; then
+    MOUNTS+=(-v "${SKILLS_DIR}/config:/workspace/.clanker/config:ro")
+fi
+
+# If .venv exists on host shadow it with a container-local volume 
+if [[ -d "${PROJECT_ROOT}/.venv" ]]; then 
+	MOUNTS+=(-v "clanker-venv-$(basename ${PROJECT_ROOT}):/workspace/.venv")
+fi
+
+# ─── Secrets handling ────────────────────────────────────────
+# We never pass secrets via environment variables.
+# Instead, we mount a tmpfs with the provider key file.
+SECRET_MOUNT="--tmpfs /run/secrets:mode=0700,size=1M"
+
+# If a provider key exists on the host, copy it to a temp file and mount
+PROVIDER_KEY_FILE="${CLANKER_PROVIDER_KEY_FILE:-${SECRETS_DIR}/provider.key}"
+if [[ -f "${PROVIDER_KEY_FILE}" ]]; then
+    TMP_KEY="$(mktemp)"
+    trap "rm -f ${TMP_KEY}" EXIT
+    cp "${PROVIDER_KEY_FILE}" "${TMP_KEY}"
+    MOUNTS+=(-v "${TMP_KEY}:/run/secrets/provider.key:ro")
+fi
+
+# ─── Environment ─────────────────────────────────────────────
+ENV_VARS=(
+    -e CLANKER_PROVIDER="${CLANKER_PROVIDER:-deepseek}"
+    -e CLANKER_MODEL="${CLANKER_MODEL:-deepseek-chat}"
+    -e CLANKER_PROVIDER_KEY_FILE="/run/secrets/provider.key"
+    -e CLANKER_PROJECT_NAME="$(basename "${PROJECT_ROOT}")"
+    -e CLANKER_SESSION_ID="${CONTAINER_NAME}"
+    # Pass through terminal capabilities
+    -e TERM="${TERM:-xterm-256color}"
+    -e LINES="${LINES:-}"
+    -e COLUMNS="${COLUMNS:-}"
+	-e CLANKER_UID="$(id -u)"
+    -e CLANKER_GID="$(id -g)"
 )
-# Personal skills, read-only, only if the host directory exists.
-[[ -d "$HOME/.claude/skills" ]] &&
-  mounts+=( -v "$HOME/.claude/skills:/home/clanker/.claude/skills:ro" )
 
-env_=(
-  -e ANTHROPIC_API_KEY
-  -e HOME=/home/clanker
-  -e "PROJECT_DIR=${PROJECT_DIR}"
-  -e CCACHE_DIR=/home/clanker/.cache/ccache
-  -e CARGO_HOME=/home/clanker/.cache/cargo
-  -e "TERM=${TERM:-xterm-256color}"
-)
+# ─── Network ─────────────────────────────────────────────────
+# No network by default. The agent reaches the provider through
+# the socket proxy running on the host.
+NETWORK="--network none"
+SOCKET_MOUNT=""
 
-# Credentials 
-# For Claude specifically ANTHROPIC_API_KEY is ranked higher than CLAUDE_OAUTH_TOKEN
-# so if both are passed the key wins, and the console is billed instead of the 
-# subscription.
-AUTH=${AGENT_AUTH:-auto}
-API_KEY_FILE=${AGENT_API_KEY_FILE:-$HOME/.config/anthropic/api-key}
+# If a provider socket proxy is available, mount it
+PROVIDER_SOCKET="${CLANKER_PROVIDER_SOCKET:-${HOME}/.cache/clanker/provider.sock}"
+if [[ -S "${PROVIDER_SOCKET}" ]]; then
+    SOCKET_MOUNT="-v ${PROVIDER_SOCKET}:/var/run/provider.sock:rw"
+elif [[ "${CLANKER_ALLOW_NETWORK:-0}" == "1" ]]; then
+    # Fallback: allow network access if explicitly enabled
+    NETWORK="--network host"
+fi
 
-creds=()
-case "$AUTH" in 
-	oauth)
-		[[ -n ${CLAUDE_CODE_OAUTH_TOKEN:-} ]] || die "AGENT_AUTH=oauth but no token set"
-		creds=( -e CLAUDE_CODE_OAUTH_TOKEN )
-		;;
-	api)
-		if [[ -z ${ANTHROPIC_API_KEY:-} && -r $API_KEY_FILE ]]; then 
-			ANTHROPIC_API_KEY=$(<"$API_KEY_FILE"); export ANTHROPIC_API_KEY
-		fi
-		[[ -n ${ANTHROPIC_API_KEY:-} ]] | die "AGENT_AUTH=api but no key found"
-		creds=( -e ANTHROPIC_API_KEY )   # name only, value never hits arg
-		;;
-	auto)
-		if   [[ -n ${CLAUDE_CODE_OAUTH_TOKEN:-} ]]; then creds=( -e CLAUDE_CODE_OAUTH_TOKEN )
-		elif [[ -n ${ANTHROPIC_API_KEY:-} ]]; then creds=( -e ANTHROPIC_API_KEY )
-		fi
-		;;
-	*) die "AGENT_AUTH must be auto, api, or oauth" ;;
-esac
+# ─── Launch ──────────────────────────────────────────────────
+echo "╔══════════════════════════════════════════════════════════╗"
+echo "║  clanker - agent environment                             ║"
+echo "╠══════════════════════════════════════════════════════════╣"
+echo "║  Project: ${PROJECT_ROOT}"
+echo "║  Provider: ${CLANKER_PROVIDER:-deepseek}"
+echo "║  Model: ${CLANKER_MODEL:-deepseek-chat}"
+echo "║  Container: ${CONTAINER_NAME}"
+echo "║  Type 'exit' to leave, Ctrl-D to detach"
+echo "╚══════════════════════════════════════════════════════════╝"
 
-
-# Other flags 
-user_flags=()
-case "$(uname -s)" in
-  Linux)  user_flags=( --user "$(id -u):$(id -g)" ) ;;
-  Darwin) : ;;   # virtiofs translates ownership; forcing --user hurts
-esac
-
-run_flags=( "${security[@]}" "${mounts[@]}" "${env_[@]}" "${user_flags[@]}" "${creds[@]}")
-
-running() { [[ -n "$($DOCKER ps -q -f "name=^${NAME}$")" ]]; }
-
-require_image() {
-  $DOCKER image inspect "$IMAGE" >/dev/null 2>&1 ||
-    die "image $IMAGE not found; run 'make build' in the tooling repo"
-}
-
-check_auth() {
-  [[ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]] && return 0
-  $DOCKER volume inspect "$STATE_VOL" >/dev/null 2>&1 && return 0
-  printf 'clanker: no token and no saved state; you will be asked to log in.\n' >&2
-  printf "clanker: for headless use, run 'claude setup-token' on the host.\n" >&2
-}
-
-# --- subcommands -----------------------------------------------------------
-cmd=${1:-run}; shift || true
-
-case "$cmd" in
-  run)
-    require_image; check_auth
-    exec $DOCKER run --rm -i "${TTY_FLAG[@]}" "${run_flags[@]}" "$IMAGE" claude "$@"
-    ;;
-  shell)
-    require_image
-    exec $DOCKER run --rm -i "${TTY_FLAG[@]}" "${run_flags[@]}" "$IMAGE" bash "$@"
-    ;;
-  up)
-    require_image; check_auth
-    running && { echo "clanker: ${NAME} already running"; exit 0; }
-    $DOCKER run -d --name "$NAME" "${run_flags[@]}" "$IMAGE" sleep infinity >/dev/null
-    echo "clanker: ${NAME} up  (${PROJECT_DIR})"
-    ;;
-  down)
-    $DOCKER rm -f "$NAME" >/dev/null 2>&1 || true
-    echo "clanker: ${NAME} down"
-    ;;
-  exec)
-    running || die "${NAME} is not running; try 'clanker up'"
-    exec $DOCKER exec -i "${TTY_FLAG[@]}" -w "$PROJECT_DIR" "$NAME" "${@:-bash}"
-    ;;
-  attach)
-    running || die "${NAME} is not running; try 'clanker up'"
-    exec $DOCKER exec -i "${TTY_FLAG[@]}" -w "$PROJECT_DIR" "$NAME" claude "$@"
-    ;;
-  task)
-    [[ $# -ge 1 ]] || die 'usage: clanker task "prompt"'
-    require_image; check_auth
-    exec $DOCKER run --rm -i "${run_flags[@]}" "$IMAGE" \
-      claude -p "$*" --output-format stream-json --verbose
-    ;;
-  ps)
-    echo "project: $PROJECT_DIR"
-    echo "key:     $KEY"
-    $DOCKER ps -a -f "name=^${NAME}$" \
-      --format 'table {{.Names}}\t{{.Status}}\t{{.Image}}'
-    $DOCKER volume ls -f "name=${STATE_VOL}" -f "name=${CACHE_VOL}"
-    ;;
-  purge)
-    read -r -p "delete ${STATE_VOL} and ${CACHE_VOL}? [y/N] " a
-    [[ "$a" == "y" ]] || die "aborted"
-    $DOCKER rm -f "$NAME" >/dev/null 2>&1 || true
-    $DOCKER volume rm "$STATE_VOL" "$CACHE_VOL" >/dev/null
-    ;;
-  help|-h|--help)
-    sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'
-    ;;
-  *)
-    die "unknown subcommand '$cmd' (try: clanker help)"
-    ;;
-esac
-
+exec docker run \
+    --rm \
+    --name "${CONTAINER_NAME}" \
+    --hostname clanker \
+    ${NETWORK} \
+    ${SECRET_MOUNT} \
+    ${SOCKET_MOUNT} \
+    "${ENV_VARS[@]}" \
+    "${MOUNTS[@]}" \
+    -it \
+    "${IMAGE_TAG}" \
+    /bin/bash --rcfile /etc/clanker/bashrc
