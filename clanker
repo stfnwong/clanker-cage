@@ -104,20 +104,28 @@ fi
 # ─── Network ─────────────────────────────────────────────────
 # No network by default. The agent reaches the provider through
 # the socket proxy running on the host.
-NETWORK="--network none"
-SOCKET_MOUNT=""
 
 # If a provider socket proxy is available, mount it
 PROVIDER_SOCKET="${CLANKER_PROVIDER_SOCKET:-${HOME}/.cache/clanker/provider.sock}"
+PROVIDER_SOCKET_DIR=$(dirname "${PROVIDER_SOCKET}")
 
+NETWORK="--network none"
+SOCKET_DIR=$(dirname "${PROVIDER_SOCKET}")
+SOCKET_MOUNT="-v ${SOCKET_DIR}:/mnt/provider/clanker:rw"
+
+# Ensure the directory exists on the host 
+mkdir -p "${PROVIDER_SOCKET_DIR}"
+
+# Check if proxy is running
 if [[ -S "${PROVIDER_SOCKET}" ]]; then
-    SOCKET_MOUNT="-v ${PROVIDER_SOCKET}:/var/run/provider.sock:rw"
+    SOCKET_MOUNT="-v ${PROVIDER_SOCKET_DIR}:/mnt/provider/clanker:rw"
+	CONTAINER_SOCKET="/mnt/provider/clanker/provider.sock"
 	echo " Provider:   socket connected"
-elif [[ "${CLANKER_ALLOW_NETWORK:-0}" == "1" ]]; then
+else
     # Fallback: allow network access if explicitly enabled
     NETWORK="--network host"
-else
-	echo " Provider:   OFFLINE (start provider-proxy on host)"
+	SOCKET_MOUNT=""
+	CONTAINER_SOCKET=""
 fi
 
 
@@ -153,7 +161,7 @@ if [[ ! -S "${PROVIDER_SOCKET}" ]]; then
 
 		if [[ -S "${PROVIDER_SOCKET}" ]]; then
 			echo "ERROR: provider proxy failed to start" >&2
-			echo "Run 'make proxy && make install' first" >&2
+			echo "Run 'make build-proxy && make install' first" >&2
 			exit 1
 		fi
 
@@ -176,7 +184,7 @@ ENV_VARS=(
     -e CLANKER_PROVIDER="${CLANKER_PROVIDER:-deepseek}"
 	-e CLANKER_PROVIDER_MODE="direct"
 	#-e CLANKER_PROVIDER_MODE="socket"
-	-e CLANKER_PROVIDER_SOCKET="/var/run/provider.sock"
+	-e CLANKER_PROVIDER_SOCKET="${CONTAINER_SOCKET}"
     -e CLANKER_MODEL="${CLANKER_MODEL:-deepseek-chat}"
     -e CLANKER_PROVIDER_KEY_FILE="/run/secrets/provider.key"
     -e CLANKER_PROJECT_NAME="$(basename "${PROJECT_ROOT}")"

@@ -8,7 +8,7 @@ if [ -f ~/.bashrc ]; then
 fi
 
 # ─── Provider connectivity check ─────────────────────────────
-if [ -S /var/run/provider.sock ]; then
+if [ -S /mnt/provider/clanker/provider.sock ]; then
     echo "  Agent: connected (socket proxy)"
     export CLANKER_PROVIDER_MODE="socket"
 elif [ -f /run/secrets/provider.key ]; then

@@ -14,7 +14,7 @@ import httpx  # pip install httpx
 # ─── Configuration ──────────────────────────────────────────
 SKILLS_PATH = Path(os.environ.get("CLANKER_SKILLS_PATH", "/etc/clanker/skills"))
 WORKSPACE = Path("/workspace")
-PROVIDER_SOCKET = Path("/var/run/provider.sock")
+PROVIDER_SOCKET = Path(os.environ.get("CLANKER_PROVIDER_SOCKET", "/mnt/provider/clanker/provider.sock"))
 PROVIDER_MODE = os.environ.get("CLANKER_PROVIDER_MODE", "socket")  # "socket", "direct", "offline"
 
 # ─── Tool Definitions (for the LLM's function-calling) ──────
@@ -143,7 +143,7 @@ def execute_tool(name: str, args: dict) -> str:
 # ─── LLM Client (provider-agnostic) ──────────────────────────
 
 def get_client():
-    socket_path = Path("/var/run/provider.sock")
+    socket_path = PROVIDER_SOCKET
     
     # Create a custom transport that connects via Unix socket
     class UnixSocketTransport(httpx.HTTPTransport):

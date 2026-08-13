@@ -145,7 +145,7 @@ prune: ## Aggressively remove all unused Docker data (careful!)
 
 # ─── Installation ───────────────────────────────────────────
 .PHONY: install
-install: build-proxy ## Build and install everything (container image + host tools)
+install: build ## Build and install everything (container image + host tools)
 	@mkdir -p $(INSTALL_DIR)
 	@ln -sf $(CURDIR)/clanker $(INSTALL_DIR)/clanker
 	@ln -sf $(CURDIR)/$(PROXY_BINARY) $(INSTALL_DIR)/provider-proxy
