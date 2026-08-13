@@ -11,6 +11,7 @@ CONTAINER_NAME="clanker-$(date +%Y%m%d-%H%M%S)-$$"
 
 # Paths that exist on the host
 PROJECT_ROOT="${CLANKER_PROJECT:-$(pwd)}"
+
 SKILLS_DIR="${CLANKER_SKILLS_DIR:-${PROJECT_ROOT}/.clanker}"
 GLOBAL_SKILLS="${SCRIPT_DIR}/skills"
 SECRETS_DIR="${CLANKER_SECRETS_DIR:-${HOME}/.config/clanker/secrets}"
@@ -88,9 +89,31 @@ if [[ -f "${PROVIDER_KEY_FILE}" ]]; then
     MOUNTS+=(-v "${TMP_KEY}:/run/secrets/provider.key:ro")
 fi
 
+# ─── Network ─────────────────────────────────────────────────
+# No network by default. The agent reaches the provider through
+# the socket proxy running on the host.
+NETWORK="--network none"
+SOCKET_MOUNT=""
+
+# If a provider socket proxy is available, mount it
+PROVIDER_SOCKET="${CLANKER_PROVIDER_SOCKET:-${HOME}/.cache/clanker/provider.sock}"
+
+if [[ -S "${PROVIDER_SOCKET}" ]]; then
+    SOCKET_MOUNT="-v ${PROVIDER_SOCKET}:/var/run/provider.sock:rw"
+	echo " Provider:   socket connected"
+elif [[ "${CLANKER_ALLOW_NETWORK:-0}" == "1" ]]; then
+    # Fallback: allow network access if explicitly enabled
+    NETWORK="--network host"
+else
+	echo " Provider:   OFFLINE (start provider-proxy on host)"
+fi
+
+
 # ─── Environment ─────────────────────────────────────────────
 ENV_VARS=(
     -e CLANKER_PROVIDER="${CLANKER_PROVIDER:-deepseek}"
+	-e CLANKER_PROVIDER_MODE="socket"
+	-e CLANKER_PROVIDER_SOCKET="/var/run/provider.sock"
     -e CLANKER_MODEL="${CLANKER_MODEL:-deepseek-chat}"
     -e CLANKER_PROVIDER_KEY_FILE="/run/secrets/provider.key"
     -e CLANKER_PROJECT_NAME="$(basename "${PROJECT_ROOT}")"
@@ -103,20 +126,6 @@ ENV_VARS=(
     -e CLANKER_GID="$(id -g)"
 )
 
-# ─── Network ─────────────────────────────────────────────────
-# No network by default. The agent reaches the provider through
-# the socket proxy running on the host.
-NETWORK="--network none"
-SOCKET_MOUNT=""
-
-# If a provider socket proxy is available, mount it
-PROVIDER_SOCKET="${CLANKER_PROVIDER_SOCKET:-${HOME}/.cache/clanker/provider.sock}"
-if [[ -S "${PROVIDER_SOCKET}" ]]; then
-    SOCKET_MOUNT="-v ${PROVIDER_SOCKET}:/var/run/provider.sock:rw"
-elif [[ "${CLANKER_ALLOW_NETWORK:-0}" == "1" ]]; then
-    # Fallback: allow network access if explicitly enabled
-    NETWORK="--network host"
-fi
 
 # ─── Launch ──────────────────────────────────────────────────
 echo "╔══════════════════════════════════════════════════════════╗"
@@ -126,6 +135,7 @@ echo "║  Project: ${PROJECT_ROOT}"
 echo "║  Provider: ${CLANKER_PROVIDER:-deepseek}"
 echo "║  Model: ${CLANKER_MODEL:-deepseek-chat}"
 echo "║  Container: ${CONTAINER_NAME}"
+echo "║  Network: isolated (socket proxy only)"
 echo "║  Type 'exit' to leave, Ctrl-D to detach"
 echo "╚══════════════════════════════════════════════════════════╝"
 
