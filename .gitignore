@@ -1,2 +1,7 @@
 # Ignore make directory 
 .make/
+
+
+# Added by cargo
+
+/target

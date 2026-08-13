@@ -9,6 +9,8 @@ DATE_TAG       := $(shell date +%Y%m%d)
 IMAGE_TAG      ?= $(DATE_TAG)-$(GIT_HASH)
 CONTAINER_TOOL ?= docker
 
+INSTALL_DIR ?= $(HOME)/.local/bin
+
 # Detect host operating system
 UNAME_S := $(shell uname -s)
 
@@ -40,9 +42,42 @@ endif
 # Use the auto-detected PLATFORM unless overridden
 PLATFORM ?= $(HOST_PLATFORM)
 
+
+
+# ─── Provider Proxy ───────────────────────────────────────────────────
+
+# Platform detection for Rust builds
+UNAME_S := $(shell uname -s)
+UNAME_M := $(shell uname -m)
+
+# Map uname to Rust target
+ifeq ($(UNAME_S),Darwin)
+    RUST_TARGET := aarch64-apple-darwin
+    ifeq ($(UNAME_M),x86_64)
+        RUST_TARGET := x86_64-apple-darwin
+    endif
+else
+    RUST_TARGET := x86_64-unknown-linux-gnu
+    ifeq ($(UNAME_M),aarch64)
+        RUST_TARGET := aarch64-unknown-linux-gnu
+    endif
+endif
+
+
+PROXY_SRC := src/main.rs
+PROXY_BINARY := target/release/clanker-provider-proxy
+
+.PHONY: build-proxy
+build-proxy: $(PROXY_BINARY)
+
+$(PROXY_BINARY): $(PROXY_SRC) Cargo.toml
+	@echo "Building provider proxy for $(RUST_TARGET)..."
+	@cargo build --release
+
+
 # ─── Build ───────────────────────────────────────────────────
 .PHONY: build
-build: ## Build the container image
+build: build-proxy   ## Build the container image
 	$(CONTAINER_TOOL) build \
 		--platform $(PLATFORM) \
 		-f docker/Dockerfile \
@@ -58,6 +93,7 @@ build-multi: ## Build for both amd64 and arm64 (requires buildx)
 		-t $(IMAGE_NAME):latest \
 		--push \
 		.
+
 
 # ─── Tag & Push ─────────────────────────────────────────────
 .PHONY: tag
@@ -105,14 +141,19 @@ clean: ## Remove the built images (keeps registry copies safe)
 prune: ## Aggressively remove all unused Docker data (careful!)
 	$(CONTAINER_TOOL) system prune -a --volumes
 
-# ─── Install the clanker host script ─────────────────────────
+
+# ─── Installation ───────────────────────────────────────────
 .PHONY: install
-install: ## Install the clanker script to ~/local/bin
-	@mkdir -p $(HOME)/local/bin
-	@cp clanker $(HOME)/local/bin/clanker
-	@chmod +x $(HOME)/local/bin/clanker
-	@echo "clanker installed to $(HOME)/local/bin/clanker"
-	@echo "Make sure $(HOME)/local/bin is on your PATH."
+install: build-proxy ## Build and install everything (container image + host tools)
+	@mkdir -p $(INSTALL_DIR)
+	@ln -sf $(CURDIR)/clanker $(INSTALL_DIR)/clanker
+	@ln -sf $(CURDIR)/$(PROXY_BINARY) $(INSTALL_DIR)/provider-proxy
+	@echo "Installed:"
+	@echo "  clanker        -> $(INSTALL_DIR)/clanker"
+	@echo "  provider-proxy -> $(INSTALL_DIR)/provider-proxy"
+	@echo ""
+	@echo "Make sure $(INSTALL_DIR) is on your PATH."
+
 
 # ─── Help ────────────────────────────────────────────────────
 .PHONY: help
