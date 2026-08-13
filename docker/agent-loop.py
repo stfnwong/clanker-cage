@@ -8,6 +8,7 @@ import sys
 from pathlib import Path
 from typing import Iterable, Literal
 
+import socket
 import httpx  # pip install httpx
 
 # ─── Configuration ──────────────────────────────────────────
@@ -140,21 +141,26 @@ def execute_tool(name: str, args: dict) -> str:
         return f"Unknown tool: {name}"
 
 # ─── LLM Client (provider-agnostic) ──────────────────────────
+
 def get_client():
-    if PROVIDER_MODE == "socket" and PROVIDER_SOCKET.exists():
-        # Unix socket transport via httpx
-        transport = httpx.HTTPTransport(uds=str(PROVIDER_SOCKET))
-        return httpx.Client(transport=transport, base_url="http://localhost/")
-    elif PROVIDER_MODE == "direct":
-        api_key = os.environ.get("CLANKER_PROVIDER_KEY_FILE")
-        if api_key and Path(api_key).exists():
-            api_key = Path(api_key).read_text().strip()
-        else:
-            api_key = os.environ.get("DEEPSEEK_API_KEY", "")
-        base_url = os.environ.get("CLANKER_PROVIDER_ENDPOINT", "https://api.deepseek.com/v1")
-        return httpx.Client(base_url=base_url, headers={"Authorization": f"Bearer {api_key}"})
-    else:
-        raise RuntimeError("No provider configured.")
+    socket_path = Path("/var/run/provider.sock")
+    
+    # Create a custom transport that connects via Unix socket
+    class UnixSocketTransport(httpx.HTTPTransport):
+        def __init__(self, socket_path):
+            super().__init__()
+            self.socket_path = str(socket_path)
+        
+        def handle_request(self, request):
+            # Override the connection method
+            sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            sock.connect(self.socket_path)
+            request.extensions["sock"] = sock
+            return super().handle_request(request)
+    
+    transport = UnixSocketTransport(socket_path)
+    return httpx.Client(transport=transport, base_url="http://localhost")
+
 
 # ─── System Prompt Construction ──────────────────────────────
 def load_skill_file() -> str:
@@ -196,6 +202,8 @@ def run_agent(prompt: str, stream_to: callable = print, mode="interactive"):
         # Stream response
         full_content = ""
         tool_calls = []
+
+        # Need full URL here
         with client.stream("POST", "/chat/completions", json=body, timeout=120) as response:
             for line in response.iter_lines():
                 if not line.startswith("data: "):

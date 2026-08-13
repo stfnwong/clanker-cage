@@ -71,51 +71,87 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 }
 
+
 async fn handle_client(
     stream: &mut UnixStream,
     api_key: &str,
     default_model: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    // Read the entire request
+    // Read HTTP headers (until \r\n\r\n)
     let mut buffer = Vec::new();
-    stream.read_to_end(&mut buffer).await?;
+    let mut temp = [0u8; 1024];
     
-    // Parse JSON request
-    let request: Value = serde_json::from_slice(&buffer)?;
-    let mut body = request.get("body").cloned().unwrap_or_else(|| json!({}));
-    
-    // Inject model if not specified
-    if body.get("model").is_none() {
-        body["model"] = json!(default_model);
+    // Read until we see \r\n\r\n
+    loop {
+        let n = stream.read(&mut temp).await?;
+        if n == 0 {
+            return Err("Connection closed".into());
+        }
+        buffer.extend_from_slice(&temp[..n]);
+        if buffer.windows(4).any(|w| w == b"\r\n\r\n") {
+            break;
+        }
     }
     
-    // Ensure stream is set
-    if body.get("stream").is_none() {
-        body["stream"] = json!(false);
+    // Parse headers to find Content-Length
+    let header_str = String::from_utf8_lossy(&buffer);
+    let content_length = header_str
+        .lines()
+        .find(|line| line.to_lowercase().starts_with("content-length:"))
+        .and_then(|line| line.split(':').nth(1))
+        .and_then(|s| s.trim().parse::<usize>().ok())
+        .unwrap_or(0);
+    
+    // Read the body
+    let mut body = vec![0u8; content_length];
+    if content_length > 0 {
+        stream.read_exact(&mut body).await?;
+    }
+    
+    // Parse JSON body
+    let request: Value = serde_json::from_slice(&body)?;
+    let mut request_body = request.get("body").cloned().unwrap_or_else(|| json!({}));
+    
+    // Inject model if not specified
+    if request_body.get("model").is_none() {
+        request_body["model"] = json!(default_model);
     }
     
     // Forward to DeepSeek
+    eprintln!("Forwarding to DeepSeek: {}", request_body.to_string().chars().take(200).collect::<String>());
+    
     let client = reqwest::Client::new();
     let response = client
         .post(format!("{}/chat/completions", BASE_URL))
         .header("Authorization", format!("Bearer {}", api_key))
         .header("Content-Type", "application/json")
-        .json(&body)
+        .json(&request_body)
         .send()
         .await?;
     
-    // Stream response back to client
-    let status = response.status();
-    let mut resp_bytes = response.bytes().await?;
+    eprintln!("Got response from DeepSeek: status {}", response.status());
     
-    // Write a minimal HTTP response header + body
-    stream.write_all(format!("HTTP/1.1 {}\r\n", status.as_u16()).as_bytes()).await?;
-    stream.write_all(b"\r\n").await?;
-    stream.write_all(&resp_bytes).await?;
+    // Stream response back
+    let status = response.status().as_u16();
+    let mut response_bytes = response.bytes().await?;
+    
+    eprintln!("Response body: {} bytes", response_bytes.len());
+    
+    // Write response back
+    stream.write_all(format!("HTTP/1.1 {}\r\n", status).as_bytes()).await?;
+    stream.write_all(b"Content-Length: ").await?;
+    stream.write_all(response_bytes.len().to_string().as_bytes()).await?;
+    stream.write_all(b"\r\n\r\n").await?;
+    stream.write_all(&response_bytes).await?;
     stream.flush().await?;
+    
+    eprintln!("Response sent to container");
     
     Ok(())
 }
+
+
+
 
 fn expand_tilde(path: &str) -> Result<PathBuf, Box<dyn std::error::Error>> {
     if let Some(stripped) = path.strip_prefix("~/") {
