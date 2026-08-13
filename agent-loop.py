@@ -174,6 +174,7 @@ When editing files, use precise diffs."""
         base += f"\n\n## Project Conventions (SKILL.md):\n{skills}"
     return base
 
+
 # ─── The Agent Loop ──────────────────────────────────────────
 def run_agent(prompt: str, stream_to: callable = print, mode="interactive"):
     client = get_client()
