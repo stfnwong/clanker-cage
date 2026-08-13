@@ -55,14 +55,14 @@ mkdir -p "${SECRETS_DIR}"
 # Add some basic Darwin support 
 
 if [[ "$(uname)" == "Darwin" ]]; then
-	MOUNT_OPTS=":delegated"
+	MOUNT_OPTS="rw,delegated"
 else
-	MOUNT_OPTS=""
+	MOUNT_OPTS="rw"
 fi
 
 MOUNTS=(
     # Project: read-write so the agent can edit files
-    -v "${PROJECT_ROOT}:/workspace:rw${MOUNT_OPTS}"
+    -v "${PROJECT_ROOT}:/workspace:${MOUNT_OPTS}"
 
     # Package caches: persist between sessions
     -v "${CLANKER_CACHE}/pip:/home/clanker/.cache/pip:rw"
@@ -202,12 +202,12 @@ ENV_VARS=(
 echo "╔══════════════════════════════════════════════════════════╗"
 echo "║  clanker - agent environment                             ║"
 echo "╠══════════════════════════════════════════════════════════╣"
-echo "║  Project: ${PROJECT_ROOT}                                ║"
-echo "║  Provider: ${CLANKER_PROVIDER:-deepseek}                 ║"
-echo "║  Model: ${CLANKER_MODEL:-deepseek-chat}                  ║"
-echo "║  Container: ${CONTAINER_NAME}                            ║"
-echo "║  Network: isolated (socket proxy only)                   ║"
-echo "║  Type 'exit' to leave, Ctrl-D to detach                  ║"
+echo "║  Project: ${PROJECT_ROOT}                                "
+echo "║  Provider: ${CLANKER_PROVIDER:-deepseek}                 "
+echo "║  Model: ${CLANKER_MODEL:-deepseek-chat}                  "
+echo "║  Container: ${CONTAINER_NAME}                            "
+echo "║  Network: isolated (socket proxy only)                   "
+echo "║  Type 'exit' to leave, Ctrl-D to detach                  "
 echo "╚══════════════════════════════════════════════════════════╝"
 
 exec docker run \
