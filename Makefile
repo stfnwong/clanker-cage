@@ -45,6 +45,7 @@ PLATFORM ?= $(HOST_PLATFORM)
 build: ## Build the container image
 	$(CONTAINER_TOOL) build \
 		--platform $(PLATFORM) \
+		-f docker/Dockerfile \
 		-t $(IMAGE_NAME):$(IMAGE_TAG) \
 		-t $(IMAGE_NAME):latest \
 		.
