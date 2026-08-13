@@ -141,25 +141,37 @@ def execute_tool(name: str, args: dict) -> str:
         return f"Unknown tool: {name}"
 
 # ─── LLM Client (provider-agnostic) ──────────────────────────
-
 def get_client():
-    socket_path = PROVIDER_SOCKET
+    socket_path = Path(os.environ.get("CLANKER_PROVIDER_SOCKET", "/mnt/provider/provider.sock"))
     
-    # Create a custom transport that connects via Unix socket
-    class UnixSocketTransport(httpx.HTTPTransport):
-        def __init__(self, socket_path):
-            super().__init__()
-            self.socket_path = str(socket_path)
-        
-        def handle_request(self, request):
-            # Override the connection method
-            sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-            sock.connect(self.socket_path)
-            request.extensions["sock"] = sock
-            return super().handle_request(request)
+    print(f"Socket path: {socket_path}", file=sys.stderr)
+    print(f"Socket exists: {socket_path.exists()}", file=sys.stderr)
     
-    transport = UnixSocketTransport(socket_path)
-    return httpx.Client(transport=transport, base_url="http://localhost")
+    if not socket_path.exists():
+        raise RuntimeError(f"Socket not found at {socket_path}")
+    
+    transport = httpx.HTTPTransport(
+        uds=str(socket_path),
+        retries=0,
+    )
+    
+    client = httpx.Client(
+        transport=transport,
+        base_url="http://localhost",
+        timeout=60,
+    )
+    
+    # Test the connection
+    try:
+        response = client.post(
+            "http://localhost/chat/completions",
+            json={"model": "deepseek-chat", "messages": [{"role": "user", "content": "test"}]},
+        )
+        print(f"Test connection: {response.status_code}", file=sys.stderr)
+    except Exception as e:
+        print(f"Test connection failed: {e}", file=sys.stderr)
+    
+    return client
 
 
 # ─── System Prompt Construction ──────────────────────────────
@@ -199,13 +211,16 @@ def run_agent(prompt: str, stream_to: callable = print, mode="interactive"):
             "tool_choice": "auto",
             "stream": True,
         }
+        # TODO: remove or add mode
+        print(f"Sending to proxy: {json.dumps(body)}", file=sys.stderr)
         # Stream response
         full_content = ""
         tool_calls = []
 
         # Need full URL here
         with client.stream("POST", "/chat/completions", json=body, timeout=120) as response:
-            for line in response.iter_lines():
+            for n, line in enumerate(response.iter_lines()):
+                print(f"line {n+1}: {line}")
                 if not line.startswith("data: "):
                     continue
                 data = line[6:]
@@ -215,11 +230,19 @@ def run_agent(prompt: str, stream_to: callable = print, mode="interactive"):
                     chunk = json.loads(data)
                 except json.JSONDecodeError:
                     continue
-                delta = chunk["choices"][0]["delta"]
+                print(f"chunk:   {chunk}")
                 # Text content
-                if "content" in delta and delta["content"]:
-                    full_content += delta["content"]
-                    stream_to(delta["content"], end="")
+                if body["stream"] is True:
+                    delta = chunk["choices"][0]["delta"]
+                    if "content" in delta and delta["content"]:
+                        full_content += delta["content"]
+                        stream_to(delta["content"], end="")
+                else:
+                    # TODO: this path is not correct
+                    message = chunk["choices"][0]["message"]
+                    if "content" in message and message["content"]:
+                        full_content += message["content"]
+                        stream_to(message["content"])
                 # Tool calls
                 if "tool_calls" in delta:
                     for tc_delta in delta["tool_calls"]:
@@ -265,6 +288,7 @@ def run_agent(prompt: str, stream_to: callable = print, mode="interactive"):
         else:
             # No content and no tool calls? Unexpected, break
             break
+    print(f"full_content: {full_content}")
     return full_content
 
 # ─── CLI Modes ───────────────────────────────────────────────

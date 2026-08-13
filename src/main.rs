@@ -77,10 +77,10 @@ async fn handle_client(
     api_key: &str,
     default_model: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    // ─── Read HTTP headers (until \r\n\r\n) ──────────────────────
     let mut buffer = Vec::new();
-    let mut temp = [0u8; 4096];
+    let mut temp = [0u8; 8192];
     
-    // ─── Step 1: Read until we see \r\n\r\n (end of headers) ──────
     loop {
         let n = stream.read(&mut temp).await?;
         if n == 0 {
@@ -88,64 +88,72 @@ async fn handle_client(
         }
         buffer.extend_from_slice(&temp[..n]);
         
-        // Check for end of headers
+        // Look for end of headers
         if buffer.windows(4).any(|w| w == b"\r\n\r\n") {
             break;
         }
         
-        // Safety limit: don't read forever
-        if buffer.len() > 64 * 1024 {
+        // Prevent unbounded growth
+        if buffer.len() > 1024 * 1024 {
             return Err("Headers too large".into());
         }
     }
     
-    // ─── Step 2: Parse Content-Length from headers ────────────────
-    let header_end = buffer.windows(4).position(|w| w == b"\r\n\r\n").unwrap() + 4;
-    let headers = String::from_utf8_lossy(&buffer[..header_end]);
+    // Find where headers end
+    let header_end = buffer.windows(4)
+        .position(|w| w == b"\r\n\r\n")
+        .ok_or("No header terminator found")? + 4;
     
-    let content_length = headers
+    // Parse headers to get Content-Length
+    let headers_str = String::from_utf8_lossy(&buffer[..header_end]);
+    let content_length = headers_str
         .lines()
         .find(|line| line.to_lowercase().starts_with("content-length:"))
         .and_then(|line| line.split(':').nth(1))
         .and_then(|s| s.trim().parse::<usize>().ok())
         .unwrap_or(0);
     
-    eprintln!("Headers parsed. Content-Length: {}", content_length);
+    eprintln!("Content-Length: {}", content_length);
     
-    // ─── Step 3: Read the body (exactly Content-Length bytes) ─────
-    let mut body = vec![0u8; content_length];
-    let mut bytes_read = 0;
+    // ─── Read the body ─────────────────────────────────────────────
+    let mut body = Vec::new();
     let body_start = header_end;
     
-    // We might have already read some of the body into buffer
+    // Copy any bytes already read past the headers
     if buffer.len() > body_start {
-        let available = buffer.len() - body_start;
-        let to_copy = available.min(content_length);
-        body[..to_copy].copy_from_slice(&buffer[body_start..body_start + to_copy]);
-        bytes_read = to_copy;
+        body.extend_from_slice(&buffer[body_start..]);
     }
     
-    // Read the rest of the body
-    while bytes_read < content_length {
-        let n = stream.read(&mut body[bytes_read..]).await?;
+    // Read remaining body bytes
+    while body.len() < content_length {
+        let n = stream.read(&mut temp).await?;
         if n == 0 {
             return Err("Connection closed while reading body".into());
         }
-        bytes_read += n;
+        body.extend_from_slice(&temp[..n]);
     }
     
-    eprintln!("Body read: {} bytes", bytes_read);
+    eprintln!("Body read: {} bytes", body.len());
     
-    // ─── Step 4: Parse the JSON body ──────────────────────────────
+    // ─── Parse JSON ───────────────────────────────────────────────
     let request: Value = serde_json::from_slice(&body)?;
-    let mut request_body = request.get("body").cloned().unwrap_or_else(|| json!({}));
+    //let mut request_body = request.get("body").cloned().unwrap_or_else(|| json!({}));
+
+    let mut request_body = if let Some(body) = request.get("body") {
+        // Expected format: {"body": {"messages": [...], "stream": true }}
+        body.clone()
+    }
+    else {
+        // Expected format: {"messages": [..], "stream": true}
+        request.clone()
+    };
     
     // Inject model if not specified
     if request_body.get("model").is_none() {
         request_body["model"] = json!(default_model);
     }
     
-    // ─── Step 5: Forward to DeepSeek ──────────────────────────────
+    // ─── Forward to DeepSeek ──────────────────────────────────────
     eprintln!("Forwarding to DeepSeek...");
     
     let client = reqwest::Client::new();
@@ -157,24 +165,21 @@ async fn handle_client(
         .send()
         .await?;
     
-    eprintln!("Got response: status {}", response.status());
-    
-    // ─── Step 6: Send response back ───────────────────────────────
     let status = response.status().as_u16();
     let response_bytes = response.bytes().await?;
     
-    eprintln!("Response body: {} bytes", response_bytes.len());
+    eprintln!("Got response: {} bytes, status {}", response_bytes.len(), status);
     
-    // Write HTTP response with proper headers
+    // ─── Write HTTP response back ─────────────────────────────────
     stream.write_all(format!("HTTP/1.1 {}\r\n", status).as_bytes()).await?;
     stream.write_all(b"Content-Type: application/json\r\n").await?;
-    stream.write_all(b"Content-Length: ").await?;
-    stream.write_all(response_bytes.len().to_string().as_bytes()).await?;
-    stream.write_all(b"\r\n\r\n").await?;
+    stream.write_all(format!("Content-Length: {}\r\n", response_bytes.len()).as_bytes()).await?;
+    stream.write_all(b"Connection: close\r\n").await?;
+    stream.write_all(b"\r\n").await?;
     stream.write_all(&response_bytes).await?;
     stream.flush().await?;
     
-    eprintln!("Response sent");
+    eprintln!("Response sent successfully");
     
     Ok(())
 }
