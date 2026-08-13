@@ -70,7 +70,7 @@ PROXY_BINARY := target/release/clanker-provider-proxy
 .PHONY: build-proxy
 build-proxy: $(PROXY_BINARY)
 
-$(PROXY_BINARY): $(PROXY_SRC) Cargo.toml
+$(PROXY_BINARY): $(PROXY_SRC) Cargo.toml Cargo.lock
 	@echo "Building provider proxy for $(RUST_TARGET)..."
 	@cargo build --release
 
@@ -136,6 +136,7 @@ lint: ## Lint the Dockerfile and scripts (requires hadolint, shellcheck)
 clean: ## Remove the built images (keeps registry copies safe)
 	$(CONTAINER_TOOL) rmi $(IMAGE_NAME):$(IMAGE_TAG) || true
 	$(CONTAINER_TOOL) rmi $(IMAGE_NAME):latest || true
+	cargo clean
 
 .PHONY: prune
 prune: ## Aggressively remove all unused Docker data (careful!)

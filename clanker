@@ -2,10 +2,28 @@
 # clanker - Drop into an isolated agent environment for the current project
 set -euo pipefail
 
+
 # ─── Configuration ───────────────────────────────────────────
 # This script lives in the clanker repo. It finds its own directory
 # to locate the Dockerfile and supporting files.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# Script version
+VERSION_FILE="${SCRIPT_DIR}/.version"
+if [[ -f "${VERSION_FILE}" ]]; then
+    VERSION="$(cat "${VERSION_FILE}")"
+else
+    VERSION="$(git -C "${SCRIPT_DIR}" rev-parse --short HEAD 2>/dev/null || echo "dev")"
+fi
+
+# Implement a version argument
+if [[ "${1:-}" == "--version" ]]; then
+    echo "clanker ${VERSION}"
+    echo "repo: ${SCRIPT_DIR}"
+    echo "image: ${IMAGE_TAG}"
+    exit 0
+fi
+
 IMAGE_TAG="clanker:latest"
 CONTAINER_NAME="clanker-$(date +%Y%m%d-%H%M%S)-$$"
 
@@ -25,12 +43,6 @@ fi
 
 if [[ ! -f "${PROJECT_ROOT}/.git" ]] && [[ ! -d "${PROJECT_ROOT}/.git" ]]; then
     echo "Warning: Not a git repository. Proceeding anyway." >&2
-fi
-
-# ─── Build image if needed ───────────────────────────────────
-if [[ -z "$(docker images -q "${IMAGE_TAG}" 2>/dev/null)" ]]; then
-    echo "Building clanker image..." >&2
-    docker build -t "${IMAGE_TAG}" "${SCRIPT_DIR}"
 fi
 
 # ─── Prepare mounts ──────────────────────────────────────────
@@ -109,10 +121,61 @@ else
 fi
 
 
+# Resolve real path (handles symlinks)
+SCRIPT_PATH="${BASH_SOURCE[0]}"
+while [ -L "${SCRIPT_PATH}" ]; do
+    SCRIPT_DIR="$(cd -P "$(dirname "${SCRIPT_PATH}")" >/dev/null 2>&1 && pwd)"
+    SCRIPT_PATH="$(readlink "${SCRIPT_PATH}")"
+    [[ ${SCRIPT_PATH} != /* ]] && SCRIPT_PATH="${SCRIPT_DIR}/${SCRIPT_PATH}"
+done
+SCRIPT_DIR="$(cd -P "$(dirname "${SCRIPT_PATH}")" >/dev/null 2>&1 && pwd)"
+
+# The proxy binary lives alongside the repo (built by make)
+PROXY_BINARY="${SCRIPT_DIR}/target/release/clanker-provider-proxy"
+
+# ─── Auto-start provider if proxy isn't running ──────────────
+if [[ ! -S "${PROVIDER_SOCKET}" ]]; then
+	echo "Provider proxy not running, attempting to start..." >&2
+
+	if [[ -x "${PROXY_BINARY}" ]]; then 
+		# Start in background
+		nohup "${PROXY_BINARY}" > /dev/null 2>&1 & 
+		PROXY_PID=$!
+
+		# Wait for socket to appear
+		for i in {1..50}; do 
+			if [[ -S "${PROVIDER_SOCKET}" ]]; then 
+				echo "Provider proxy started with (PID ${PROXY_PID})" >&2 
+				break
+			fi 
+			sleep 0.1
+		done
+
+		if [[ -S "${PROVIDER_SOCKET}" ]]; then
+			echo "ERROR: provider proxy failed to start" >&2
+			echo "Run 'make proxy && make install' first" >&2
+			exit 1
+		fi
+
+	else
+		echo "ERROR: provider proxy binary not found at ${PROXY_BINARY}" >&2 
+		echo "Run 'make build-proxy' to compile it" >&2 
+		exit 1
+	fi
+fi
+
+# ─── Build image if needed ───────────────────────────────────
+if [[ -z "$(docker images -q "${IMAGE_TAG}" 2>/dev/null)" ]]; then
+    echo "Building clanker image..." >&2
+    docker build -t "${IMAGE_TAG}" "${SCRIPT_DIR}"
+fi
+
+
 # ─── Environment ─────────────────────────────────────────────
 ENV_VARS=(
     -e CLANKER_PROVIDER="${CLANKER_PROVIDER:-deepseek}"
-	-e CLANKER_PROVIDER_MODE="socket"
+	-e CLANKER_PROVIDER_MODE="direct"
+	#-e CLANKER_PROVIDER_MODE="socket"
 	-e CLANKER_PROVIDER_SOCKET="/var/run/provider.sock"
     -e CLANKER_MODEL="${CLANKER_MODEL:-deepseek-chat}"
     -e CLANKER_PROVIDER_KEY_FILE="/run/secrets/provider.key"
@@ -131,12 +194,12 @@ ENV_VARS=(
 echo "╔══════════════════════════════════════════════════════════╗"
 echo "║  clanker - agent environment                             ║"
 echo "╠══════════════════════════════════════════════════════════╣"
-echo "║  Project: ${PROJECT_ROOT}"
-echo "║  Provider: ${CLANKER_PROVIDER:-deepseek}"
-echo "║  Model: ${CLANKER_MODEL:-deepseek-chat}"
-echo "║  Container: ${CONTAINER_NAME}"
-echo "║  Network: isolated (socket proxy only)"
-echo "║  Type 'exit' to leave, Ctrl-D to detach"
+echo "║  Project: ${PROJECT_ROOT}                                ║"
+echo "║  Provider: ${CLANKER_PROVIDER:-deepseek}                 ║"
+echo "║  Model: ${CLANKER_MODEL:-deepseek-chat}                  ║"
+echo "║  Container: ${CONTAINER_NAME}                            ║"
+echo "║  Network: isolated (socket proxy only)                   ║"
+echo "║  Type 'exit' to leave, Ctrl-D to detach                  ║"
 echo "╚══════════════════════════════════════════════════════════╝"
 
 exec docker run \

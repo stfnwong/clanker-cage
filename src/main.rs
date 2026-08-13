@@ -16,6 +16,20 @@ const DEFAULT_MODEL: &str = "deepseek-chat";
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let socket_path = expand_tilde(SOCKET_PATH)?;
+
+    // In main(), before binding:
+    eprintln!("Attempting to bind to {}", socket_path.display());
+
+    let listener = match UnixListener::bind(&socket_path) {
+        Ok(l) => l,
+        Err(e) => {
+            eprintln!("Bind failed: {}", e);
+            return Err(e.into());
+        }
+    };
+
+    eprintln!("Bound successfully, accepting connections...");
+
     
     // Clean up stale socket
     if socket_path.exists() {

@@ -40,6 +40,5 @@ RUN chmod +x /usr/local/bin/entrypoint
 
 WORKDIR /workspace
 
-# TODO: why do I need this entrypoint?
 ENTRYPOINT ["/usr/local/bin/entrypoint"]
 CMD ["/bin/bash", "--rcfile", "/etc/clanker/bashrc"]
