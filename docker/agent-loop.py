@@ -194,7 +194,7 @@ When editing files, use precise diffs."""
 
 
 # ─── The Agent Loop ──────────────────────────────────────────
-def run_agent(prompt: str, stream_to: callable = print, mode="interactive"):
+def run_agent(prompt: str, stream_to: callable = print, mode="interactive", use_stream: bool=False):
     client = get_client()
     messages = [
         {"role": "system", "content": build_system_prompt()},
@@ -209,7 +209,7 @@ def run_agent(prompt: str, stream_to: callable = print, mode="interactive"):
             "messages": messages,
             "tools": TOOLS,
             "tool_choice": "auto",
-            "stream": True,
+            "stream": use_stream,
         }
         # TODO: remove or add mode
         print(f"Sending to proxy: {json.dumps(body)}", file=sys.stderr)
@@ -221,42 +221,42 @@ def run_agent(prompt: str, stream_to: callable = print, mode="interactive"):
         with client.stream("POST", "/chat/completions", json=body, timeout=120) as response:
             for n, line in enumerate(response.iter_lines()):
                 print(f"line {n+1}: {line}")
-                if not line.startswith("data: "):
-                    continue
-                data = line[6:]
-                if data == "[DONE]":
-                    break
-                try:
-                    chunk = json.loads(data)
-                except json.JSONDecodeError:
-                    continue
-                print(f"chunk:   {chunk}")
                 # Text content
                 if body["stream"] is True:
+                    if not line.startswith("data: "):
+                        continue
+                    data = line[6:]
+                    if data == "[DONE]":
+                        break
+                    try:
+                        chunk = json.loads(data)
+                    except json.JSONDecodeError:
+                        continue
                     delta = chunk["choices"][0]["delta"]
                     if "content" in delta and delta["content"]:
                         full_content += delta["content"]
                         stream_to(delta["content"], end="")
+                    # Tool calls
+                    if "tool_calls" in delta:
+                        for tc_delta in delta["tool_calls"]:
+                            idx = tc_delta.get("index", 0)
+                            # Ensure list is long enough
+                            while len(tool_calls) <= idx:
+                                tool_calls.append({"id": "", "function": {"name": "", "arguments": ""}})
+                            if "id" in tc_delta:
+                                tool_calls[idx]["id"] = tc_delta["id"]
+                            if "function" in tc_delta:
+                                if "name" in tc_delta["function"]:
+                                    tool_calls[idx]["function"]["name"] += tc_delta["function"]["name"]
+                                if "arguments" in tc_delta["function"]:
+                                    tool_calls[idx]["function"]["arguments"] += tc_delta["function"]["arguments"]
                 else:
-                    # TODO: this path is not correct
+                    chunk = json.loads(line)
                     message = chunk["choices"][0]["message"]
                     if "content" in message and message["content"]:
                         full_content += message["content"]
                         stream_to(message["content"])
-                # Tool calls
-                if "tool_calls" in delta:
-                    for tc_delta in delta["tool_calls"]:
-                        idx = tc_delta.get("index", 0)
-                        # Ensure list is long enough
-                        while len(tool_calls) <= idx:
-                            tool_calls.append({"id": "", "function": {"name": "", "arguments": ""}})
-                        if "id" in tc_delta:
-                            tool_calls[idx]["id"] = tc_delta["id"]
-                        if "function" in tc_delta:
-                            if "name" in tc_delta["function"]:
-                                tool_calls[idx]["function"]["name"] += tc_delta["function"]["name"]
-                            if "arguments" in tc_delta["function"]:
-                                tool_calls[idx]["function"]["arguments"] += tc_delta["function"]["arguments"]
+                    # TODO: tool call
         # After stream, decide next step
         if full_content and not tool_calls:
             # Pure text response, no tool calls -> final answer
