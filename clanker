@@ -143,20 +143,7 @@ else
 	fi
 fi
 
-#echo "Provider ${CLANKER_PROVIDER_MODE} via ${CLANKER_PROVIDER_ENDPOINT} ${CLANKER_PROVIDER_SOCKET}" >&2
-
-
-## Check if proxy is running
-#if [[ -S "${PROVIDER_SOCKET}" ]]; then
-#    SOCKET_MOUNT="-v ${PROVIDER_SOCKET_DIR}:/mnt/provider/clanker:rw"
-#	CONTAINER_SOCKET="/mnt/provider/clanker/provider.sock"
-#	echo " Provider:   socket connected"
-#else
-#    # Fallback: allow network access if explicitly enabled
-#    NETWORK="--network host"
-#	SOCKET_MOUNT=""
-#	CONTAINER_SOCKET=""
-#fi
+echo "Provider [${CLANKER_PROVIDER_MODE}] via ${CLANKER_PROVIDER_ENDPOINT} ${CLANKER_PROVIDER_SOCKET}" >&2
 
 
 # Resolve real path (handles symlinks)
@@ -231,7 +218,7 @@ ENV_VARS=(
 # ─── Launch ──────────────────────────────────────────────────
 echo "╔══════════════════════════════════════════════════════════╗"
 echo "║  clanker - agent environment                             ║"
-echo "╠══════════════════════════════════════════════════════════╣"
+echo "╠══════════════════════════════════════════════════════════╝"
 echo "║  Project: ${PROJECT_ROOT}                                "
 echo "║  Provider: ${CLANKER_PROVIDER:-deepseek}                 "
 echo "║  Model: ${CLANKER_MODEL:-deepseek-chat}                  "
@@ -241,7 +228,7 @@ echo "║    Mode:     ${CLANKER_PROVIDER_MODE}"
 echo "║    Socket:   ${CLANKER_PROVIDER_SOCKET}"
 echo "║    Endpoint: ${CLANKER_PROVIDER_ENDPOINT}"
 echo "║  Type 'exit' to leave, Ctrl-D to detach                  "
-echo "╚══════════════════════════════════════════════════════════╝"
+echo "╚═══════════════════════════════════════════════════════════"
 
 exec docker run \
     --rm \
