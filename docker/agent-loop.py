@@ -346,6 +346,7 @@ def main():
         prompt = input("clanker> ")
     run_agent(prompt, verbose=args.verbose)
 
+
 def run_json_mode():
     """Read JSON request from stdin, process, write JSON responses to stdout."""
     try:

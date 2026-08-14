@@ -148,6 +148,7 @@ prune: ## Aggressively remove all unused Docker data (careful!)
 install: build ## Build and install everything (container image + host tools)
 	@mkdir -p $(INSTALL_DIR)
 	@ln -sf $(CURDIR)/clanker $(INSTALL_DIR)/clanker
+	@ln -sf $(CURDIR)/clanker-proxy-start.sh $(INSTALL_DIR)/clanker-proxy-start
 	@ln -sf $(CURDIR)/$(PROXY_BINARY) $(INSTALL_DIR)/provider-proxy
 	@echo "Installed:"
 	@echo "  clanker        -> $(INSTALL_DIR)/clanker"

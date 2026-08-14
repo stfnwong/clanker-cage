@@ -15,6 +15,7 @@ const DEFAULT_SOCKET: &str = "~/.cache/clanker/provider.sock";
 const BASE_URL: &str = "https://api.deepseek.com/v1";
 const DEFAULT_MODEL: &str = "deepseek-chat";
 
+
 fn expand_tilde(path: &str) -> PathBuf {
     if let Some(stripped) = path.strip_prefix("~/") {
         let home = env::var("HOME").expect("HOME not set");
@@ -132,6 +133,7 @@ async fn run_tcp(port: u16, api_key: String, model: String) -> Result<()> {
     }
 }
 
+
 async fn run_unix(socket_path: PathBuf, api_key: String, model: String) -> Result<()> {
     if socket_path.exists() {
         std::fs::remove_file(&socket_path)?;
@@ -157,6 +159,7 @@ async fn run_unix(socket_path: PathBuf, api_key: String, model: String) -> Resul
         });
     }
 }
+
 
 #[tokio::main]
 async fn main() -> Result<()> {
