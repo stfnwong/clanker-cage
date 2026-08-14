@@ -1,110 +1,50 @@
-// provider-proxy.rs
-// Host-side Unix socket proxy for LLM API calls.
-// Holds API keys. Forwards to DeepSeek. Keeps keys out of containers.
+// provider-proxy.rs — Cross-platform provider proxy for clanker
 
-use std::fs;
-use std::os::unix::fs::PermissionsExt;
+use anyhow::{anyhow, Result};
+use std::env;
 use std::path::PathBuf;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{UnixListener, UnixStream};
+use tokio::net::{TcpListener, UnixListener};
 use serde_json::{json, Value};
 
-const SOCKET_PATH: &str = "~/.cache/clanker/provider.sock";
+const DEFAULT_PORT: u16 = 11434;
+const DEFAULT_SOCKET: &str = "~/.cache/clanker/provider.sock";
 const BASE_URL: &str = "https://api.deepseek.com/v1";
 const DEFAULT_MODEL: &str = "deepseek-chat";
 
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let socket_path = expand_tilde(SOCKET_PATH)?;
-
-    // In main(), before binding:
-    eprintln!("Attempting to bind to {}", socket_path.display());
-
-    let _listener = match UnixListener::bind(&socket_path) {
-        Ok(l) => l,
-        Err(e) => {
-            eprintln!("Bind failed: {}", e);
-            return Err(e.into());
-        }
-    };
-
-    eprintln!("Bound successfully, accepting connections...");
-
-    
-    // Clean up stale socket
-    if socket_path.exists() {
-        fs::remove_file(&socket_path)?;
-    }
-    
-    // Ensure parent directory exists
-    if let Some(parent) = socket_path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    
-    // Get API key from environment
-    let api_key = std::env::var("DEEPSEEK_API_KEY")
-        .expect("DEEPSEEK_API_KEY not set");
-    let model = std::env::var("CLANKER_MODEL").unwrap_or_else(|_| DEFAULT_MODEL.to_string());
-    
-    // Create Unix socket listener
-    let listener = UnixListener::bind(&socket_path)?;
-    
-    // Set permissions so only the user can access it
-    let metadata = fs::metadata(&socket_path)?;
-    let mut perms = metadata.permissions();
-    perms.set_mode(0o600);
-    fs::set_permissions(&socket_path, perms)?;
-    
-    eprintln!("Provider proxy listening on {}", socket_path.display());
-    eprintln!("Model: {}", model);
-    
-    loop {
-        let (mut stream, _) = listener.accept().await?;
-        let api_key = api_key.clone();
-        let model = model.clone();
-        
-        tokio::spawn(async move {
-            if let Err(e) = handle_client(&mut stream, &api_key, &model).await {
-                eprintln!("Client error: {}", e);
-            }
-        });
+fn expand_tilde(path: &str) -> PathBuf {
+    if let Some(stripped) = path.strip_prefix("~/") {
+        let home = env::var("HOME").expect("HOME not set");
+        PathBuf::from(home).join(stripped)
+    } else {
+        PathBuf::from(path)
     }
 }
 
-
-async fn handle_client(
-    stream: &mut UnixStream,
-    api_key: &str,
-    default_model: &str,
-) -> Result<(), Box<dyn std::error::Error>> {
-    // ─── Read HTTP headers (until \r\n\r\n) ──────────────────────
+async fn handle_client<R, W>(reader: &mut R, writer: &mut W, api_key: &str, model: &str) -> Result<()>
+where
+    R: AsyncReadExt + Unpin,
+    W: AsyncWriteExt + Unpin,
+{
+    // Read HTTP headers
     let mut buffer = Vec::new();
     let mut temp = [0u8; 8192];
-    
+    let header_end;
     loop {
-        let n = stream.read(&mut temp).await?;
+        let n = reader.read(&mut temp).await?;
         if n == 0 {
-            return Err("Connection closed while reading headers".into());
+            return Err(anyhow!("Connection closed while reading headers"));
         }
         buffer.extend_from_slice(&temp[..n]);
-        
-        // Look for end of headers
-        if buffer.windows(4).any(|w| w == b"\r\n\r\n") {
+        if let Some(pos) = buffer.windows(4).position(|w| w == b"\r\n\r\n") {
+            header_end = pos + 4;
             break;
         }
-        
-        // Prevent unbounded growth
         if buffer.len() > 1024 * 1024 {
-            return Err("Headers too large".into());
+            return Err(anyhow!("Headers too large"));
         }
     }
-    
-    // Find where headers end
-    let header_end = buffer.windows(4)
-        .position(|w| w == b"\r\n\r\n")
-        .ok_or("No header terminator found")? + 4;
-    
-    // Parse headers to get Content-Length
+
     let headers_str = String::from_utf8_lossy(&buffer[..header_end]);
     let content_length = headers_str
         .lines()
@@ -112,50 +52,42 @@ async fn handle_client(
         .and_then(|line| line.split(':').nth(1))
         .and_then(|s| s.trim().parse::<usize>().ok())
         .unwrap_or(0);
-    
-    eprintln!("Content-Length: {}", content_length);
-    
-    // ─── Read the body ─────────────────────────────────────────────
+
+    // Read body
     let mut body = Vec::new();
-    let body_start = header_end;
-    
-    // Copy any bytes already read past the headers
-    if buffer.len() > body_start {
-        body.extend_from_slice(&buffer[body_start..]);
-    }
-    
-    // Read remaining body bytes
+    body.extend_from_slice(&buffer[header_end..]);
     while body.len() < content_length {
-        let n = stream.read(&mut temp).await?;
+        let n = reader.read(&mut temp).await?;
         if n == 0 {
-            return Err("Connection closed while reading body".into());
+            return Err(anyhow!("Connection closed while reading body"));
         }
         body.extend_from_slice(&temp[..n]);
     }
-    
-    eprintln!("Body read: {} bytes", body.len());
-    
-    // ─── Parse JSON ───────────────────────────────────────────────
-    let request: Value = serde_json::from_slice(&body)?;
-    //let mut request_body = request.get("body").cloned().unwrap_or_else(|| json!({}));
 
-    let mut request_body = if let Some(body) = request.get("body") {
-        // Expected format: {"body": {"messages": [...], "stream": true }}
-        body.clone()
+    // Health endpoint
+    if headers_str.starts_with("GET /health") {
+        let response_body = b"ok";
+        writer.write_all(b"HTTP/1.1 200 OK\r\n").await?;
+        writer.write_all(b"Content-Type: text/plain\r\n").await?;
+        writer.write_all(format!("Content-Length: {}\r\n", response_body.len()).as_bytes()).await?;
+        writer.write_all(b"Connection: close\r\n\r\n").await?;
+        writer.write_all(response_body).await?;
+        writer.flush().await?;
+        return Ok(());
     }
-    else {
-        // Expected format: {"messages": [..], "stream": true}
+
+    // Parse JSON envelope
+    let request: Value = serde_json::from_slice(&body)?;
+    let mut request_body = if let Some(inner) = request.get("body") {
+        inner.clone()
+    } else {
         request.clone()
     };
-    
-    // Inject model if not specified
     if request_body.get("model").is_none() {
-        request_body["model"] = json!(default_model);
+        request_body["model"] = json!(model);
     }
-    
-    // ─── Forward to DeepSeek ──────────────────────────────────────
-    eprintln!("Forwarding to DeepSeek...");
-    
+
+    // Forward to DeepSeek
     let client = reqwest::Client::new();
     let response = client
         .post(format!("{}/chat/completions", BASE_URL))
@@ -164,33 +96,83 @@ async fn handle_client(
         .json(&request_body)
         .send()
         .await?;
-    
+
     let status = response.status().as_u16();
     let response_bytes = response.bytes().await?;
-    
-    eprintln!("Got response: {} bytes, status {}", response_bytes.len(), status);
-    
-    // ─── Write HTTP response back ─────────────────────────────────
-    stream.write_all(format!("HTTP/1.1 {}\r\n", status).as_bytes()).await?;
-    stream.write_all(b"Content-Type: application/json\r\n").await?;
-    stream.write_all(format!("Content-Length: {}\r\n", response_bytes.len()).as_bytes()).await?;
-    stream.write_all(b"Connection: close\r\n").await?;
-    stream.write_all(b"\r\n").await?;
-    stream.write_all(&response_bytes).await?;
-    stream.flush().await?;
-    
-    eprintln!("Response sent successfully");
-    
+
+    // Write response back
+    writer.write_all(format!("HTTP/1.1 {}\r\n", status).as_bytes()).await?;
+    writer.write_all(b"Content-Type: application/json\r\n").await?;
+    writer.write_all(format!("Content-Length: {}\r\n", response_bytes.len()).as_bytes()).await?;
+    writer.write_all(b"Connection: close\r\n\r\n").await?;
+    writer.write_all(&response_bytes).await?;
+    writer.flush().await?;
     Ok(())
 }
 
+async fn run_tcp(port: u16, api_key: String, model: String) -> Result<()> {
+    // Bind to 0.0.0.0 so Docker containers can reach via host.docker.internal
+    let addr = format!("0.0.0.0:{}", port);
+    let listener = TcpListener::bind(&addr).await?;
+    eprintln!("Provider proxy (TCP) listening on {}", addr);
 
-
-fn expand_tilde(path: &str) -> Result<PathBuf, Box<dyn std::error::Error>> {
-    if let Some(stripped) = path.strip_prefix("~/") {
-        let home = std::env::var("HOME")?;
-        Ok(PathBuf::from(home).join(stripped))
-    } else {
-        Ok(PathBuf::from(path))
+    loop {
+        let (mut socket, _) = listener.accept().await?;
+        let api_key = api_key.clone();
+        let model = model.clone();
+        tokio::spawn(async move {
+            if let Err(e) = handle_client(&mut socket, &mut socket, &api_key, &model).await {
+                eprintln!("Client error: {}", e);
+            }
+        });
     }
+}
+
+async fn run_unix(socket_path: PathBuf, api_key: String, model: String) -> Result<()> {
+    if socket_path.exists() {
+        std::fs::remove_file(&socket_path)?;
+    }
+    if let Some(parent) = socket_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let listener = UnixListener::bind(&socket_path)?;
+    let metadata = std::fs::metadata(&socket_path)?;
+    let mut perms = metadata.permissions();
+    perms.set_mode(0o600);
+    std::fs::set_permissions(&socket_path, perms)?;
+    eprintln!("Provider proxy (Unix socket) listening on {}", socket_path.display());
+
+    loop {
+        let (mut socket, _) = listener.accept().await?;
+        let api_key = api_key.clone();
+        let model = model.clone();
+        tokio::spawn(async move {
+            if let Err(e) = handle_client(&mut socket, &mut socket, &api_key, &model).await {
+                eprintln!("Client error: {}", e);
+            }
+        });
+    }
+}
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    let args: Vec<String> = env::args().collect();
+    let tcp_mode = args.iter().any(|a| a == "--tcp");
+    let port = args
+        .iter()
+        .position(|a| a == "--port")
+        .and_then(|i| args.get(i + 1))
+        .and_then(|p| p.parse::<u16>().ok())
+        .unwrap_or(DEFAULT_PORT);
+
+    let api_key = env::var("DEEPSEEK_API_KEY").expect("DEEPSEEK_API_KEY not set");
+    let model = env::var("CLANKER_MODEL").unwrap_or_else(|_| DEFAULT_MODEL.to_string());
+
+    if tcp_mode {
+        run_tcp(port, api_key, model).await?;
+    } else {
+        let socket_path = expand_tilde(DEFAULT_SOCKET);
+        run_unix(socket_path, api_key, model).await?;
+    }
+    Ok(())
 }
