@@ -6,7 +6,7 @@ import os
 import subprocess
 import sys
 from pathlib import Path
-from typing import Iterable, Literal
+from typing import Callable, Iterable, Literal
 
 import socket
 import httpx  # pip install httpx
@@ -197,7 +197,7 @@ When editing files, use precise diffs."""
 # ─── The Agent Loop ──────────────────────────────────────────
 def run_agent(
     prompt: str, 
-    stream_to: callable = print, 
+    stream_to: Callable = print, 
     mode="interactive", 
     use_stream: bool=True, 
     verbose:bool=False,
@@ -249,6 +249,7 @@ def run_agent(
                     if "content" in delta and delta["content"]:
                         full_content += delta["content"]
                         stream_to(delta["content"], end="")
+
                     # Tool calls
                     if "tool_calls" in delta:
                         for tc_delta in delta["tool_calls"]:
@@ -282,37 +283,6 @@ def run_agent(
 
         if verbose:
             print(f"tool_calls: {tool_calls}")
-
-        #if tool_calls:
-        #    # Add assistant message with tool calls to history
-        #    assistant_msg = {
-        #        "role": "assistant",
-        #        "type": "assistant",   # TODO: may not need this...
-        #        "content": full_content or None,
-        #        "tool_calls": tool_calls,
-        #    }
-
-        #    messages.append(assistant_msg)
-        #    # Execute each tool and add results
-        #    for tc in tool_calls:
-        #        fn_name = tc["function"]["name"]
-        #        fn_args = json.loads(tc["function"]["arguments"])
-        #        stream_to(f"\n[Running {fn_name}...]")
-        #        result = execute_tool(fn_name, fn_args)
-
-        #        # Truncate huge results
-        #        if len(result) > 8000:
-        #            result = result[:8000] + "\n... [truncated]"
-        #        messages.append({
-        #            "role": "tool",
-        #            "type": "tool",
-        #            "tool_call_id": tc["id"],
-        #            "content": result,
-        #        })
-        #    # Continue loop to get next assistant response
-        #else:
-        #    # No content and no tool calls? Unexpected, break
-        #    break
 
         if tool_calls:
             assistant_msg = {

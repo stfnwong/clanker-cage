@@ -112,9 +112,6 @@ fi
 PROVIDER_SOCKET="${CLANKER_PROVIDER_SOCKET:-${HOME}/.cache/clanker/provider.sock}"
 PROVIDER_SOCKET_DIR=$(dirname "${PROVIDER_SOCKET}")
 
-#NETWORK="--network none"
-#SOCKET_DIR=$(dirname "${PROVIDER_SOCKET}")
-#SOCKET_MOUNT="-v ${SOCKET_DIR}:/mnt/provider/clanker:rw"
 
 # Ensure the directory exists on the host 
 mkdir -p "${PROVIDER_SOCKET_DIR}"
