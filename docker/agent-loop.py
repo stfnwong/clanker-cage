@@ -78,6 +78,7 @@ TOOLS = [
     },
 ]
 
+
 # ─── Tool Execution (sandboxed) ──────────────────────────────
 def execute_tool(name: str, args: dict) -> str:
     """Execute a tool and return the result string."""
@@ -194,14 +195,21 @@ When editing files, use precise diffs."""
 
 
 # ─── The Agent Loop ──────────────────────────────────────────
-def run_agent(prompt: str, stream_to: callable = print, mode="interactive", use_stream: bool=False):
+def run_agent(
+    prompt: str, 
+    stream_to: callable = print, 
+    mode="interactive", 
+    use_stream: bool=True, 
+    verbose:bool=False,
+    max_turns: int=30,
+) -> str:
     client = get_client()
     messages = [
         {"role": "system", "content": build_system_prompt()},
         {"role": "user", "content": prompt},
     ]
     turn = 0
-    while turn < 30:  # safety limit
+    while turn < max_turns:  # safety limit
         turn += 1
         # Prepare request
         body = {
@@ -211,8 +219,10 @@ def run_agent(prompt: str, stream_to: callable = print, mode="interactive", use_
             "tool_choice": "auto",
             "stream": use_stream,
         }
-        # TODO: remove or add mode
-        print(f"Sending to proxy: {json.dumps(body)}", file=sys.stderr)
+
+        if verbose:
+            print(f"Sending to proxy: {json.dumps(body)}", file=sys.stderr)
+
         # Stream response
         full_content = ""
         tool_calls = []
@@ -220,7 +230,10 @@ def run_agent(prompt: str, stream_to: callable = print, mode="interactive", use_
         # Need full URL here
         with client.stream("POST", "/chat/completions", json=body, timeout=120) as response:
             for n, line in enumerate(response.iter_lines()):
-                print(f"line {n+1}: {line}")
+                if verbose:
+                    print(f"line {n+1}: {line}")
+
+                # ==== Streaming mode
                 # Text content
                 if body["stream"] is True:
                     if not line.startswith("data: "):
@@ -245,50 +258,88 @@ def run_agent(prompt: str, stream_to: callable = print, mode="interactive", use_
                                 tool_calls.append({"id": "", "function": {"name": "", "arguments": ""}})
                             if "id" in tc_delta:
                                 tool_calls[idx]["id"] = tc_delta["id"]
+                            if "type" in tc_delta:
+                                tool_calls[idx]["type"] = tc_delta["type"]
                             if "function" in tc_delta:
                                 if "name" in tc_delta["function"]:
                                     tool_calls[idx]["function"]["name"] += tc_delta["function"]["name"]
                                 if "arguments" in tc_delta["function"]:
                                     tool_calls[idx]["function"]["arguments"] += tc_delta["function"]["arguments"]
+                # ==== Non-streaming mode
                 else:
                     chunk = json.loads(line)
                     message = chunk["choices"][0]["message"]
                     if "content" in message and message["content"]:
                         full_content += message["content"]
                         stream_to(message["content"])
-                    # TODO: tool call
+                    # TODO: Add support for tool calls in non-streaming mode
+
         # After stream, decide next step
         if full_content and not tool_calls:
             # Pure text response, no tool calls -> final answer
             stream_to("")
             break
+
+        if verbose:
+            print(f"tool_calls: {tool_calls}")
+
+        #if tool_calls:
+        #    # Add assistant message with tool calls to history
+        #    assistant_msg = {
+        #        "role": "assistant",
+        #        "type": "assistant",   # TODO: may not need this...
+        #        "content": full_content or None,
+        #        "tool_calls": tool_calls,
+        #    }
+
+        #    messages.append(assistant_msg)
+        #    # Execute each tool and add results
+        #    for tc in tool_calls:
+        #        fn_name = tc["function"]["name"]
+        #        fn_args = json.loads(tc["function"]["arguments"])
+        #        stream_to(f"\n[Running {fn_name}...]")
+        #        result = execute_tool(fn_name, fn_args)
+
+        #        # Truncate huge results
+        #        if len(result) > 8000:
+        #            result = result[:8000] + "\n... [truncated]"
+        #        messages.append({
+        #            "role": "tool",
+        #            "type": "tool",
+        #            "tool_call_id": tc["id"],
+        #            "content": result,
+        #        })
+        #    # Continue loop to get next assistant response
+        #else:
+        #    # No content and no tool calls? Unexpected, break
+        #    break
+
         if tool_calls:
-            # Add assistant message with tool calls to history
             assistant_msg = {
                 "role": "assistant",
+                "type": "assistant",
                 "content": full_content or None,
                 "tool_calls": tool_calls,
             }
             messages.append(assistant_msg)
-            # Execute each tool and add results
+            
             for tc in tool_calls:
                 fn_name = tc["function"]["name"]
                 fn_args = json.loads(tc["function"]["arguments"])
                 stream_to(f"\n[Running {fn_name}...]")
                 result = execute_tool(fn_name, fn_args)
-                # Truncate huge results
                 if len(result) > 8000:
                     result = result[:8000] + "\n... [truncated]"
                 messages.append({
                     "role": "tool",
+                    "type": "tool",
                     "tool_call_id": tc["id"],
                     "content": result,
                 })
-            # Continue loop to get next assistant response
-        else:
-            # No content and no tool calls? Unexpected, break
-            break
-    print(f"full_content: {full_content}")
+
+    if verbose:
+        print(f"full_content: {full_content}")
+
     return full_content
 
 # ─── CLI Modes ───────────────────────────────────────────────
@@ -298,6 +349,7 @@ def main():
     parser.add_argument("--pipe", action="store_true", help="Read context from stdin, prompt as argument")
     parser.add_argument("--json", action="store_true", help="JSON protocol for Neovim integration")
     parser.add_argument("--oneshot", action="store_true", help="Single question, no tool calls (just append 'Answer concisely')")
+    parser.add_argument("--verbose", action="store_true", help="Set verbose mode", default=False)
     args = parser.parse_args()
 
     if args.json:
@@ -309,12 +361,12 @@ def main():
         context = sys.stdin.read()
         prompt = " ".join(args.prompt)
         full_prompt = f"Context:\n{context}\n\n---\n\nInstruction: {prompt}"
-        run_agent(full_prompt, stream_to=lambda s, end="": print(s, end=end, flush=True))
+        run_agent(full_prompt, stream_to=lambda s, end="": print(s, end=end, flush=True), verbose=args.verbose)
         return
 
     if args.oneshot:
         prompt = " ".join(args.prompt)
-        run_agent(prompt + " (Provide a concise answer without using tools.)", mode="oneshot")
+        run_agent(prompt + " (Provide a concise answer without using tools.)", mode="oneshot", verbose=args.verbose)
         return
 
     # Default interactive mode
@@ -322,7 +374,7 @@ def main():
         prompt = " ".join(args.prompt)
     else:
         prompt = input("clanker> ")
-    run_agent(prompt)
+    run_agent(prompt, verbose=args.verbose)
 
 def run_json_mode():
     """Read JSON request from stdin, process, write JSON responses to stdout."""
@@ -341,7 +393,7 @@ def run_json_mode():
         sys.stdout.write(json.dumps({"type": "text", "content": text + end}) + "\n")
         sys.stdout.flush()
 
-    run_agent(full_prompt, stream_to=stream_callback)
+    run_agent(full_prompt, stream_to=stream_callback, verbose=args.verbose)
     sys.stdout.write(json.dumps({"type": "finished"}) + "\n")
 
 if __name__ == "__main__":
