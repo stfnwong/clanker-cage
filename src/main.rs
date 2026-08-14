@@ -20,7 +20,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // In main(), before binding:
     eprintln!("Attempting to bind to {}", socket_path.display());
 
-    let listener = match UnixListener::bind(&socket_path) {
+    let _listener = match UnixListener::bind(&socket_path) {
         Ok(l) => l,
         Err(e) => {
             eprintln!("Bind failed: {}", e);

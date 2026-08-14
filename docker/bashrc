@@ -8,17 +8,54 @@ if [ -f ~/.bashrc ]; then
 fi
 
 # ─── Provider connectivity check ─────────────────────────────
-if [ -S /mnt/provider/clanker/provider.sock ]; then
-    echo "  Agent: connected (socket proxy)"
-    export CLANKER_PROVIDER_MODE="socket"
-elif [ -f /run/secrets/provider.key ]; then
-    echo "  Agent: connected (direct API key)"
-    export CLANKER_PROVIDER_MODE="direct"
-else
-    echo "  Agent: offline (no provider configured)"
-    echo "  Start the provider proxy on the host: clanker-proxy &"
-    export CLANKER_PROVIDER_MODE="offline"
-fi
+#if [ -S /mnt/provider/clanker/provider.sock ]; then
+#    echo "  Agent: connected (socket proxy)"
+#    export CLANKER_PROVIDER_MODE="socket"
+#elif [ -f /run/secrets/provider.key ]; then
+#    echo "  Agent: connected (direct API key)"
+#    export CLANKER_PROVIDER_MODE="direct"
+#else
+#    echo "  Agent: offline (no provider configured)"
+#    echo "  Start the provider proxy on the host: clanker-proxy &"
+#    export CLANKER_PROVIDER_MODE="offline"
+#fi
+
+# Provider connectivity check
+case "${CLANKER_PROVIDER_MODE:-unknown}" in
+    socket)
+        if [ -S "${CLANKER_PROVIDER_SOCKET:-/var/run/provider.sock}" ]; then
+            echo "  Agent: connected (Unix socket)"
+            export CLANKER_PROVIDER_MODE="socket"
+        else
+            echo "  Agent: OFFLINE (socket not found)"
+            export CLANKER_PROVIDER_MODE="offline"
+        fi
+        ;;
+    tcp)
+        endpoint="${CLANKER_PROVIDER_ENDPOINT:-http://host.docker.internal:11434}"
+        # Use curl to check the health endpoint (must be present on proxy)
+        if curl -fsS --max-time 2 "${endpoint}/health" >/dev/null 2>&1; then
+            echo "  Agent: connected (TCP proxy at ${endpoint})"
+            export CLANKER_PROVIDER_MODE="tcp"
+        else
+            echo "  Agent: OFFLINE (cannot reach ${endpoint})"
+            export CLANKER_PROVIDER_MODE="offline"
+        fi
+        ;;
+    direct)
+        if [ -n "${DEEPSEEK_API_KEY:-}" ] || [ -f /run/secrets/provider.key ]; then
+            echo "  Agent: connected (direct API key)"
+            export CLANKER_PROVIDER_MODE="direct"
+        else
+            echo "  Agent: OFFLINE (no API key found)"
+            export CLANKER_PROVIDER_MODE="offline"
+        fi
+        ;;
+    *)
+        echo "  Agent: OFFLINE (no provider mode set)"
+        export CLANKER_PROVIDER_MODE="offline"
+        ;;
+esac
 
 # ─── Skill file discovery ────────────────────────────────────
 # Priority: project .clanker/skills/ > global /etc/clanker/skills/

@@ -8,6 +8,9 @@ set -euo pipefail
 # to locate the Dockerfile and supporting files.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+# Detect OS
+UNAME_S="$(uname -s)"
+
 # Script version
 VERSION_FILE="${SCRIPT_DIR}/.version"
 if [[ -f "${VERSION_FILE}" ]]; then
@@ -109,24 +112,51 @@ fi
 PROVIDER_SOCKET="${CLANKER_PROVIDER_SOCKET:-${HOME}/.cache/clanker/provider.sock}"
 PROVIDER_SOCKET_DIR=$(dirname "${PROVIDER_SOCKET}")
 
-NETWORK="--network none"
-SOCKET_DIR=$(dirname "${PROVIDER_SOCKET}")
-SOCKET_MOUNT="-v ${SOCKET_DIR}:/mnt/provider/clanker:rw"
+#NETWORK="--network none"
+#SOCKET_DIR=$(dirname "${PROVIDER_SOCKET}")
+#SOCKET_MOUNT="-v ${SOCKET_DIR}:/mnt/provider/clanker:rw"
 
 # Ensure the directory exists on the host 
 mkdir -p "${PROVIDER_SOCKET_DIR}"
 
-# Check if proxy is running
-if [[ -S "${PROVIDER_SOCKET}" ]]; then
-    SOCKET_MOUNT="-v ${PROVIDER_SOCKET_DIR}:/mnt/provider/clanker:rw"
-	CONTAINER_SOCKET="/mnt/provider/clanker/provider.sock"
-	echo " Provider:   socket connected"
+NETWORK=""
+SOCKET_MOUNT=""
+
+if [[ "$UNAME_S" == "Darwin" ]]; then
+	# On OSX use TCP to host.docker.internal
+	NETWORK=""
+	CLANKER_PROVIDER_MODE="tcp"
+	CLANKER_PROVIDER_ENDPOINT="https://host.docker.internal:11434"
+	CLANKER_PROVIDER_SOCKET=""
 else
-    # Fallback: allow network access if explicitly enabled
-    NETWORK="--network host"
-	SOCKET_MOUNT=""
-	CONTAINER_SOCKET=""
+	# On linux use unix socker 
+	NETWORK="--network none"
+	if [[ -S "${PROVIDER_SOCKET}" ]]; then
+		SOCKET_MOUNT="-v ${PROVIDER_SOCKET}:/var/run/provider.sock:rw"
+		CLANKER_PROVIDER_MODE="socket"
+		CLANKER_PROVIDER_SOCKET="/var/run/provider.sock"
+		CLANKER_PROVIDER_ENDPOINT=""
+	else
+		CLANKER_PROVIDER_MODE="offline"
+		CLANKER_PROVIDER_SOCKET=""
+		CLANKER_PROVIDER_ENDPOINT=""
+	fi
 fi
+
+#echo "Provider ${CLANKER_PROVIDER_MODE} via ${CLANKER_PROVIDER_ENDPOINT} ${CLANKER_PROVIDER_SOCKET}" >&2
+
+
+## Check if proxy is running
+#if [[ -S "${PROVIDER_SOCKET}" ]]; then
+#    SOCKET_MOUNT="-v ${PROVIDER_SOCKET_DIR}:/mnt/provider/clanker:rw"
+#	CONTAINER_SOCKET="/mnt/provider/clanker/provider.sock"
+#	echo " Provider:   socket connected"
+#else
+#    # Fallback: allow network access if explicitly enabled
+#    NETWORK="--network host"
+#	SOCKET_MOUNT=""
+#	CONTAINER_SOCKET=""
+#fi
 
 
 # Resolve real path (handles symlinks)
@@ -142,7 +172,7 @@ SCRIPT_DIR="$(cd -P "$(dirname "${SCRIPT_PATH}")" >/dev/null 2>&1 && pwd)"
 PROXY_BINARY="${SCRIPT_DIR}/target/release/clanker-provider-proxy"
 
 # ─── Auto-start provider if proxy isn't running ──────────────
-if [[ ! -S "${PROVIDER_SOCKET}" ]]; then
+if [[ ! -S "${CLANKER_PROVIDER_SOCKET}" ]]; then
 	echo "Provider proxy not running, attempting to start..." >&2
 
 	if [[ -x "${PROXY_BINARY}" ]]; then 
@@ -152,14 +182,14 @@ if [[ ! -S "${PROVIDER_SOCKET}" ]]; then
 
 		# Wait for socket to appear
 		for i in {1..50}; do 
-			if [[ -S "${PROVIDER_SOCKET}" ]]; then 
+			if [[ -S "${CLANKER_PROVIDER_SOCKET}" ]]; then 
 				echo "Provider proxy started with (PID ${PROXY_PID})" >&2 
 				break
 			fi 
 			sleep 0.1
 		done
 
-		if [[ -S "${PROVIDER_SOCKET}" ]]; then
+		if [[ -S "${CLANKER_PROVIDER_SOCKET}" ]]; then
 			echo "ERROR: provider proxy failed to start" >&2
 			echo "Run 'make build-proxy && make install' first" >&2
 			exit 1
@@ -182,9 +212,9 @@ fi
 # ─── Environment ─────────────────────────────────────────────
 ENV_VARS=(
     -e CLANKER_PROVIDER="${CLANKER_PROVIDER:-deepseek}"
-	-e CLANKER_PROVIDER_MODE="direct"
-	#-e CLANKER_PROVIDER_MODE="socket"
-	-e CLANKER_PROVIDER_SOCKET="${CONTAINER_SOCKET}"
+	-e CLANKER_PROVIDER_MODE="${CLANKER_PROVIDER_MODE}"
+	-e CLANKER_PROVIDER_SOCKET="${CLANKER_PROVIDER_SOCKET}"
+	-e CLANKER_PROVIDER_ENDPOINT="${CLANKER_PROVIDER_ENDPOINT}"
     -e CLANKER_MODEL="${CLANKER_MODEL:-deepseek-chat}"
     -e CLANKER_PROVIDER_KEY_FILE="/run/secrets/provider.key"
     -e CLANKER_PROJECT_NAME="$(basename "${PROJECT_ROOT}")"
@@ -206,7 +236,10 @@ echo "║  Project: ${PROJECT_ROOT}                                "
 echo "║  Provider: ${CLANKER_PROVIDER:-deepseek}                 "
 echo "║  Model: ${CLANKER_MODEL:-deepseek-chat}                  "
 echo "║  Container: ${CONTAINER_NAME}                            "
-echo "║  Network: isolated (socket proxy only)                   "
+echo "║  Network: "
+echo "║    Mode:     ${CLANKER_PROVIDER_MODE}"
+echo "║    Socket:   ${CLANKER_PROVIDER_SOCKET}"
+echo "║    Endpoint: ${CLANKER_PROVIDER_ENDPOINT}"
 echo "║  Type 'exit' to leave, Ctrl-D to detach                  "
 echo "╚══════════════════════════════════════════════════════════╝"
 
