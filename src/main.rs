@@ -7,6 +7,9 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, UnixListener};
 use serde_json::{json, Value};
 
+use std::os::unix::fs::PermissionsExt;
+
+
 const DEFAULT_PORT: u16 = 11434;
 const DEFAULT_SOCKET: &str = "~/.cache/clanker/provider.sock";
 const BASE_URL: &str = "https://api.deepseek.com/v1";
@@ -21,17 +24,17 @@ fn expand_tilde(path: &str) -> PathBuf {
     }
 }
 
-async fn handle_client<R, W>(reader: &mut R, writer: &mut W, api_key: &str, model: &str) -> Result<()>
+
+async fn handle_client<S>(stream: &mut S, api_key: &str, default_model: &str) -> Result<()>
 where
-    R: AsyncReadExt + Unpin,
-    W: AsyncWriteExt + Unpin,
+    S: AsyncReadExt + AsyncWriteExt + Unpin,
 {
     // Read HTTP headers
     let mut buffer = Vec::new();
     let mut temp = [0u8; 8192];
     let header_end;
     loop {
-        let n = reader.read(&mut temp).await?;
+        let n = stream.read(&mut temp).await?;
         if n == 0 {
             return Err(anyhow!("Connection closed while reading headers"));
         }
@@ -57,7 +60,7 @@ where
     let mut body = Vec::new();
     body.extend_from_slice(&buffer[header_end..]);
     while body.len() < content_length {
-        let n = reader.read(&mut temp).await?;
+        let n = stream.read(&mut temp).await?;
         if n == 0 {
             return Err(anyhow!("Connection closed while reading body"));
         }
@@ -67,12 +70,12 @@ where
     // Health endpoint
     if headers_str.starts_with("GET /health") {
         let response_body = b"ok";
-        writer.write_all(b"HTTP/1.1 200 OK\r\n").await?;
-        writer.write_all(b"Content-Type: text/plain\r\n").await?;
-        writer.write_all(format!("Content-Length: {}\r\n", response_body.len()).as_bytes()).await?;
-        writer.write_all(b"Connection: close\r\n\r\n").await?;
-        writer.write_all(response_body).await?;
-        writer.flush().await?;
+        stream.write_all(b"HTTP/1.1 200 OK\r\n").await?;
+        stream.write_all(b"Content-Type: text/plain\r\n").await?;
+        stream.write_all(format!("Content-Length: {}\r\n", response_body.len()).as_bytes()).await?;
+        stream.write_all(b"Connection: close\r\n\r\n").await?;
+        stream.write_all(response_body).await?;
+        stream.flush().await?;
         return Ok(());
     }
 
@@ -84,7 +87,7 @@ where
         request.clone()
     };
     if request_body.get("model").is_none() {
-        request_body["model"] = json!(model);
+        request_body["model"] = json!(default_model);
     }
 
     // Forward to DeepSeek
@@ -100,15 +103,16 @@ where
     let status = response.status().as_u16();
     let response_bytes = response.bytes().await?;
 
-    // Write response back
-    writer.write_all(format!("HTTP/1.1 {}\r\n", status).as_bytes()).await?;
-    writer.write_all(b"Content-Type: application/json\r\n").await?;
-    writer.write_all(format!("Content-Length: {}\r\n", response_bytes.len()).as_bytes()).await?;
-    writer.write_all(b"Connection: close\r\n\r\n").await?;
-    writer.write_all(&response_bytes).await?;
-    writer.flush().await?;
+    // Write response back using same stream
+    stream.write_all(format!("HTTP/1.1 {}\r\n", status).as_bytes()).await?;
+    stream.write_all(b"Content-Type: application/json\r\n").await?;
+    stream.write_all(format!("Content-Length: {}\r\n", response_bytes.len()).as_bytes()).await?;
+    stream.write_all(b"Connection: close\r\n\r\n").await?;
+    stream.write_all(&response_bytes).await?;
+    stream.flush().await?;
     Ok(())
 }
+
 
 async fn run_tcp(port: u16, api_key: String, model: String) -> Result<()> {
     // Bind to 0.0.0.0 so Docker containers can reach via host.docker.internal
@@ -121,7 +125,7 @@ async fn run_tcp(port: u16, api_key: String, model: String) -> Result<()> {
         let api_key = api_key.clone();
         let model = model.clone();
         tokio::spawn(async move {
-            if let Err(e) = handle_client(&mut socket, &mut socket, &api_key, &model).await {
+            if let Err(e) = handle_client(&mut socket, &api_key, &model).await {
                 eprintln!("Client error: {}", e);
             }
         });
@@ -147,7 +151,7 @@ async fn run_unix(socket_path: PathBuf, api_key: String, model: String) -> Resul
         let api_key = api_key.clone();
         let model = model.clone();
         tokio::spawn(async move {
-            if let Err(e) = handle_client(&mut socket, &mut socket, &api_key, &model).await {
+            if let Err(e) = handle_client(&mut socket, &api_key, &model).await {
                 eprintln!("Client error: {}", e);
             }
         });
