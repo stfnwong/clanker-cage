@@ -8,7 +8,7 @@ ENV LANG=C.UTF-8 LC_ALL=C.UTF-8 TZ=UTC DEBIAN_FRONTEND=noninteractive
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
       ca-certificates git openssh-client \
-      build-essential curl clang clang-format clang-tidy lld cmake ninja-build ccache gosu \
+      build-essential fzf curl clang clang-format clang-tidy lld cmake ninja-build ccache gosu \
       python3 python3-pip python3-venv pipx ripgrep jq gdb npm\
  && rm -rf /var/lib/apt/lists/*
 

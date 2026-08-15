@@ -29,6 +29,8 @@ fi
 
 IMAGE_TAG="clanker:latest"
 CONTAINER_NAME="clanker-$(date +%Y%m%d-%H%M%S)-$$"
+# Write container name to a file on startup
+echo "$CONTAINER_NAME" > "$HOME/.cache/clanker/current-container"
 
 # Paths that exist on the host
 PROJECT_ROOT="${CLANKER_PROJECT:-$(pwd)}"
