@@ -9,7 +9,7 @@
     <array>
         <string>/bin/bash</string>
         <string>-c</string>
-        <string>exec $HOME/local/bin/clanker-proxy-start</string>
+        <string>exec $HOME/.local/bin/clanker-proxy-start</string>
     </array>
 
     <key>RunAtLoad</key>

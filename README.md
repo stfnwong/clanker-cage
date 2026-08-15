@@ -33,7 +33,7 @@ to manually start the service.
 
 ## On OSX
 
-Copy `proxy/com.clanker.provider-proxy.plist`  to `~Library/LaunchAgents/com.clanker.provider-proxy.plist`. Load the agent once by doing
+Copy `proxy/com.clanker.provider-proxy.plist`  to `~/Library/LaunchAgents/com.clanker.provider-proxy.plist`. Load the agent once by doing
 
 ```bash
 launchctl load ~/Library/LaunchAgents/com.clanker.provider-proxy.plist

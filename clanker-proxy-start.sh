@@ -9,4 +9,4 @@ else
 fi
 
 # Adjust path to your actual binary
-exec "$HOME/local/bin/clanker-provider-proxy" --tcp --port 11434
+exec "$HOME/.local/bin/clanker-provider-proxy" --tcp --port 11434
