@@ -1,0 +1,12 @@
+# ~/.config/systemd/user/clanker-proxy.service
+[Unit]
+Description=Clanker Provider Proxy
+After=network-online.target
+
+[Service]
+Type=simple
+ExecStart=%h/local/bin/clanker-proxy-start
+Restart=on-failure
+
+[Install]
+WantedBy=default.target

@@ -14,3 +14,35 @@ The idea is that the container is a kind of throwaway sandbox in which we can co
 - From here build the image (`make build`)
 - Take `clanker` and copy it somewhere so that its on `$PATH`, perhaps somewhere like `/usr/local/bin`, or `~/.local/bin`.
 - The idea of `clanker` is that it gives a set of commands which put a new `clanker-cage` into the current project directory. So `cd to/where/project/is && clanker up && clanker attach` is the intended workflow.
+
+
+
+# Proxy setup
+Communication between the agent and container is proxied through a separate process. This is implemented as a long running process in a platform specific way. 
+
+
+## On Linux 
+Copy `proxy/clanker-proxy.service` to somewhere like `~/.config/systemd/user/clanker-proxy.service`. Then do
+
+```bash
+systemctl --user enable --now clanker-proxy.service
+```
+
+to manually start the service.
+
+
+## On OSX
+
+Copy `proxy/com.clanker.provider-proxy.plist`  to `~Library/LaunchAgents/com.clanker.provider-proxy.plist`. Load the agent once by doing
+
+```bash
+launchctl load ~/Library/LaunchAgents/com.clanker.provider-proxy.plist
+```
+
+On newer OSX this might be 
+
+```bash
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.clanker.provider-proxy.plist
+```
+
+
