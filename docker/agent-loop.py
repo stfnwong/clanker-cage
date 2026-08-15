@@ -247,22 +247,139 @@ def _log_event(session_file: Path, event_type: str, **kwargs) -> None:
 
 
 # ─── The Agent Loop ──────────────────────────────────────────
+# ─── Response draining helpers ──────────────────────────────
+def _make_request_body(messages, use_stream: bool) -> dict:
+    return {
+        "model": os.environ.get("CLANKER_MODEL", "deepseek-chat"),
+        "messages": messages,
+        "tools": TOOLS,
+        "tool_choice": "auto",
+        "stream": use_stream,
+    }
+
+
+class TurnResult:
+    """Summary of a single LLM call: text content, tool calls, and usage."""
+    __slots__ = ("content", "tool_calls", "usage")
+
+    def __init__(self, content="", tool_calls=None, usage=None):
+        self.content = content
+        self.tool_calls = tool_calls or []
+        self.usage = usage or {}
+
+    @property
+    def is_final(self) -> bool:
+        """A pure text answer with no tool calls terminates the turn."""
+        return bool(self.content) and not self.tool_calls
+
+
+def _add_tool_call_chunk(tool_calls, tc_delta) -> None:
+    """Accumulate a streaming tool-call delta into the (mutable) tool_calls list."""
+    idx = tc_delta.get("index", 0)
+    while len(tool_calls) <= idx:
+        tool_calls.append({"id": "", "function": {"name": "", "arguments": ""}})
+    if "id" in tc_delta:
+        tool_calls[idx]["id"] = tc_delta["id"]
+    if "type" in tc_delta:
+        tool_calls[idx]["type"] = tc_delta["type"]
+    fn = tc_delta.get("function")
+    if fn:
+        if "name" in fn:
+            tool_calls[idx]["function"]["name"] += fn["name"]
+        if "arguments" in fn:
+            tool_calls[idx]["function"]["arguments"] += fn["arguments"]
+
+
+def _drain_stream(client, body, stream_to, verbose) -> TurnResult:
+    """Read a streaming SSE response and assemble content / tool_calls / usage."""
+    result = TurnResult()
+    with client.stream("POST", "/chat/completions", json=body, timeout=120) as response:
+        for n, line in enumerate(response.iter_lines()):
+            if verbose:
+                print(f"line {n+1}: {line}", file=sys.stderr)
+            if not line.startswith("data: "):
+                continue
+            data = line[6:]
+            if data == "[DONE]":
+                break
+            try:
+                chunk = json.loads(data)
+            except json.JSONDecodeError:
+                continue
+            # DeepSeek/OpenAI streaming APIs include cumulative usage on the
+            # final data chunk of each response.
+            if chunk.get("usage"):
+                result.usage = dict(chunk["usage"])
+            delta = chunk["choices"][0]["delta"]
+            if delta.get("content"):
+                result.content += delta["content"]
+                stream_to(delta["content"], end="")
+            if "tool_calls" in delta:
+                for tc_delta in delta["tool_calls"]:
+                    _add_tool_call_chunk(result.tool_calls, tc_delta)
+    return result
+
+
+def _drain_nonstream(client, body, stream_to, verbose) -> TurnResult:
+    """Read a plain JSON response and assemble content / tool_calls / usage."""
+    result = TurnResult()
+    with client.stream("POST", "/chat/completions", json=body, timeout=120) as response:
+        for n, line in enumerate(response.iter_lines()):
+            if verbose:
+                print(f"line {n+1}: {line}", file=sys.stderr)
+            if not line:
+                continue
+            chunk = json.loads(line)
+            if chunk.get("usage"):
+                result.usage = dict(chunk["usage"])
+            message = chunk["choices"][0]["message"]
+            if message.get("content"):
+                result.content += message["content"]
+                stream_to(message["content"])
+            # NB: tool_calls in non-streaming mode are not supported yet.
+    return result
+
+
+def _run_tool_calls(tool_calls, messages, stream_to, content=None) -> None:
+    """Append the assistant msg + execute each tool, appending tool results."""
+    messages.append({
+        "role": "assistant",
+        "type": "assistant",
+        "content": content,
+        "tool_calls": tool_calls,
+    })
+    for tc in tool_calls:
+        fn_name = tc["function"]["name"]
+        fn_args = json.loads(tc["function"]["arguments"])
+        stream_to(f"\n[Running {fn_name}...]")
+        result = execute_tool(fn_name, fn_args)
+        if len(result) > 8000:
+            result = result[:8000] + "\n... [truncated]"
+        messages.append({
+            "role": "tool",
+            "type": "tool",
+            "tool_call_id": tc["id"],
+            "content": result,
+        })
+
+
+# ─── The Agent Loop ──────────────────────────────────────────
 def run_agent(
-    prompt: str, 
-    stream_to: Callable = print, 
-    mode="interactive", 
-    use_stream: bool=True, 
-    verbose:bool=False,
-    max_turns: int=30,
+    prompt: str,
+    stream_to: Callable = print,
+    mode="interactive",
+    use_stream: bool = True,
+    verbose: bool = False,
+    max_turns: int = 30,
     session_file: Path | None = None,
 ) -> str:
 
-    start = time.perf_counter()
+    started = time.perf_counter()
 
     if session_file:
         _log_event(
-            session_file, 
-            "session_start", 
+            session_file,
+            "session_start",
             project=os.environ.get("CLANKER_PROJECT_NAME", "unknown"),
             session_id=os.environ.get("CLANKER_PROJECT_NAME", "unknown"),
         )
@@ -272,146 +389,62 @@ def run_agent(
         {"role": "system", "content": build_system_prompt()},
         {"role": "user", "content": prompt},
     ]
-    turn = 0
     total_usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
-    while turn < max_turns:  # safety limit
-        turn += 1
-        # Prepare request
-        body = {
-            "model": os.environ.get("CLANKER_MODEL", "deepseek-chat"),
-            "messages": messages,
-            "tools": TOOLS,
-            "tool_choice": "auto",
-            "stream": use_stream,
-        }
+    final = ""
 
-        if verbose:
-            print(f"Sending to proxy: {json.dumps(body)}", file=sys.stderr)
-
-        # Stream response
-        full_content = ""
-        tool_calls = []
-        turn_usage = {}
-
+    for turn in range(1, max_turns + 1):  # safety limit
         if session_file:
             _log_event(session_file, "user", content=prompt)
 
-        # Need full URL here
-        # TODO: refactor this loop as its a pain to read...
-        with client.stream("POST", "/chat/completions", json=body, timeout=120) as response:
-            for n, line in enumerate(response.iter_lines()):
-                if verbose:
-                    print(f"line {n+1}: {line}")
+        body = _make_request_body(messages, use_stream)
+        if verbose:
+            print(f"Sending to proxy: {json.dumps(body)}", file=sys.stderr)
 
-                # ==== Streaming mode
-                # Text content
-                if body["stream"] is True:
-                    if not line.startswith("data: "):
-                        continue
-                    data = line[6:]
-                    if data == "[DONE]":
-                        break
-                    try:
-                        chunk = json.loads(data)
-                    except json.JSONDecodeError:
-                        continue
-                    # DeepSeek/OpenAI streaming APIs include cumulative usage on the
-                    # final data chunk of each response.
-                    if "usage" in chunk and chunk["usage"]:
-                        turn_usage = dict(chunk["usage"])
-                    delta = chunk["choices"][0]["delta"]
-                    if "content" in delta and delta["content"]:
-                        full_content += delta["content"]
-                        stream_to(delta["content"], end="")
+        # Exchange one round-trip with the model.
+        drain = _drain_stream if use_stream else _drain_nonstream
+        result = drain(client, body, stream_to, verbose)
 
-                    # Tool calls
-                    if "tool_calls" in delta:
-                        for tc_delta in delta["tool_calls"]:
-                            idx = tc_delta.get("index", 0)
-                            # Ensure list is long enough
-                            while len(tool_calls) <= idx:
-                                tool_calls.append({"id": "", "function": {"name": "", "arguments": ""}})
-                            if "id" in tc_delta:
-                                tool_calls[idx]["id"] = tc_delta["id"]
-                            if "type" in tc_delta:
-                                tool_calls[idx]["type"] = tc_delta["type"]
-                            if "function" in tc_delta:
-                                if "name" in tc_delta["function"]:
-                                    tool_calls[idx]["function"]["name"] += tc_delta["function"]["name"]
-                                if "arguments" in tc_delta["function"]:
-                                    tool_calls[idx]["function"]["arguments"] += tc_delta["function"]["arguments"]
-
-                        if session_file:
-                            _log_event(
-                                session_file, 
-                                "assistant", 
-                                content=full_content or None,
-                                tool_calls=tool_calls or None,
-                            )
-
-                # ==== Non-streaming mode
-                else:
-                    chunk = json.loads(line)
-                    if "usage" in chunk and chunk["usage"]:
-                        turn_usage = dict(chunk["usage"])
-                    message = chunk["choices"][0]["message"]
-                    if "content" in message and message["content"]:
-                        full_content += message["content"]
-                        stream_to(message["content"])
-                    # TODO: Add support for tool calls in non-streaming mode
-
-        # Log token usage for this call/turn (if the provider returned it)
-        if turn_usage and session_file:
-            _log_event(session_file, "llm_call", turn=turn, usage=turn_usage)
-        if turn_usage:
-            for k in ("prompt_tokens", "completion_tokens", "total_tokens"):
-                total_usage[k] = total_usage.get(k, 0) + turn_usage.get(k, 0)
-
-        # After stream, decide next step
-        if full_content and not tool_calls:
-            # Pure text response, no tool calls -> final answer
-            stream_to("")
-            break
+        # Persist the assistant output for this turn.
+        if session_file:
+            _log_event(
+                session_file,
+                "assistant",
+                content=result.content or None,
+                tool_calls=result.tool_calls or None,
+            )
+            if result.usage:
+                _log_event(session_file, "llm_call", turn=turn, usage=result.usage)
+        for k in ("prompt_tokens", "completion_tokens", "total_tokens"):
+            total_usage[k] = total_usage.get(k, 0) + result.usage.get(k, 0)
 
         if verbose:
-            print(f"tool_calls: {tool_calls}")
+            print(f"tool_calls: {result.tool_calls}", file=sys.stderr)
 
-        if tool_calls:
-            assistant_msg = {
-                "role": "assistant",
-                "type": "assistant",
-                "content": full_content or None,
-                "tool_calls": tool_calls,
-            }
-            messages.append(assistant_msg)
-            
-            for tc in tool_calls:
-                fn_name = tc["function"]["name"]
-                fn_args = json.loads(tc["function"]["arguments"])
-                stream_to(f"\n[Running {fn_name}...]")
-                result = execute_tool(fn_name, fn_args)
-                if len(result) > 8000:
-                    result = result[:8000] + "\n... [truncated]"
-                messages.append({
-                    "role": "tool",
-                    "type": "tool",
-                    "tool_call_id": tc["id"],
-                    "content": result,
-                })
+        # A pure text answer ends the turn; otherwise run any requested tools.
+        if result.is_final:
+            stream_to("")
+            final = result.content
+            break
+
+        if result.tool_calls:
+            _run_tool_calls(result.tool_calls, messages, stream_to, content=result.content)
+        else:
+            # No content and no tools: nothing useful arrived; bail out.
+            final = result.content
+            break
 
     if verbose:
-        print(f"full_content: {full_content}")
+        print(f"full_content: {final}", file=sys.stderr)
 
-    elapsed = time.perf_counter() - t0
     if session_file:
         _log_event(
             session_file, "session_end",
-            duration_seconds=elapsed,
+            duration_seconds=time.perf_counter() - started,
             turns=turn,
             usage=total_usage,
         )
 
-    return full_content
+    return final
 
 
 
