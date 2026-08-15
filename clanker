@@ -121,28 +121,27 @@ mkdir -p "${PROVIDER_SOCKET_DIR}"
 NETWORK=""
 SOCKET_MOUNT=""
 
-if [[ "$UNAME_S" == "Darwin" ]]; then
-	# On OSX use TCP to host.docker.internal
-	NETWORK=""
-	CLANKER_PROVIDER_MODE="tcp"
-	CLANKER_PROVIDER_ENDPOINT="http://host.docker.internal:11434"
-	CLANKER_PROVIDER_SOCKET=""
-else
-	# On linux use unix socker 
-	NETWORK="--network none"
-	if [[ -S "${PROVIDER_SOCKET}" ]]; then
-		SOCKET_MOUNT="-v ${PROVIDER_SOCKET}:/var/run/provider.sock:rw"
-		CLANKER_PROVIDER_MODE="socket"
-		CLANKER_PROVIDER_SOCKET="/var/run/provider.sock"
-		CLANKER_PROVIDER_ENDPOINT=""
-	else
-		CLANKER_PROVIDER_MODE="offline"
-		CLANKER_PROVIDER_SOCKET=""
-		CLANKER_PROVIDER_ENDPOINT=""
-	fi
-fi
+#if [[ "$UNAME_S" == "Darwin" ]]; then
+#	# On OSX use TCP to host.docker.internal
+#	NETWORK=""
+#	CLANKER_PROVIDER_MODE="tcp"
+#	CLANKER_PROVIDER_ENDPOINT="http://host.docker.internal:11434"
+#	CLANKER_PROVIDER_SOCKET=""
+#else
+#	# On linux use unix socker 
+#	NETWORK="--network none"
+#	if [[ -S "${PROVIDER_SOCKET}" ]]; then
+#		SOCKET_MOUNT="-v ${PROVIDER_SOCKET}:/var/run/provider.sock:rw"
+#		CLANKER_PROVIDER_MODE="socket"
+#		CLANKER_PROVIDER_SOCKET="/var/run/provider.sock"
+#		CLANKER_PROVIDER_ENDPOINT=""
+#	else
+#		CLANKER_PROVIDER_MODE="offline"
+#		CLANKER_PROVIDER_SOCKET=""
+#		CLANKER_PROVIDER_ENDPOINT=""
+#	fi
+#fi
 
-echo "Using provider [${CLANKER_PROVIDER_MODE}] via ${CLANKER_PROVIDER_ENDPOINT} ${CLANKER_PROVIDER_SOCKET}" >&2
 
 
 # Resolve real path (handles symlinks)
@@ -159,37 +158,60 @@ PROXY_BINARY="${SCRIPT_DIR}/target/release/clanker-provider-proxy"
 
 
 # ─── Auto-start provider if proxy isn't running ──────────────
-#PROXY_ENDPOINT="http://127.0.0.1:11434"
-#
-#check_proxy() {
-#    curl -fsS --max-time 2 "${PROXY_ENDPOINT}/health" >/dev/null 2>&1
-#}
-#
-#if check_proxy; then
-#    echo "  Provider: TCP proxy running"
-#    ENV_VARS+=(
-#        -e CLANKER_PROVIDER_MODE="tcp"
-#        -e CLANKER_PROVIDER_ENDPOINT="http://host.docker.internal:11434"
-#    )
-#else
-#    echo "  Provider: proxy not reachable. Attempting to start..."
-#    # Optionally try to load the LaunchAgent if not already loaded
-#    if ! launchctl list | grep -q "com.clanker.provider-proxy"; then
-#        launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.clanker.provider-proxy.plist 2>/dev/null
-#    fi
-#    # Wait a moment for it to come up
-#    sleep 1
-#    if check_proxy; then
-#        echo "  Provider: TCP proxy started"
-#        ENV_VARS+=(
-#            -e CLANKER_PROVIDER_MODE="tcp"
-#            -e CLANKER_PROVIDER_ENDPOINT="http://host.docker.internal:11434"
-#        )
-#    else
-#        echo "  Provider: OFFLINE (could not start proxy)"
-#        ENV_VARS+=(-e CLANKER_PROVIDER_MODE="offline")
-#    fi
-#fi
+PROXY_ENDPOINT="http://127.0.0.1:11434"
+
+check_proxy() {
+    curl -fsS --max-time 2 "${PROXY_ENDPOINT}/health" >/dev/null 2>&1
+}
+
+NETWORK=""
+SOCKET_MOUNT=""
+
+if [[ "$UNAME_S" == "Darwin" ]]; then 
+
+	if check_proxy; then
+		echo "  Provider: TCP proxy running"
+		CLANKER_PROVIDER_MODE="tcp"
+		CLANKER_PROVIDER_ENDPOINT="http://host.docker.internal:11434"
+	else
+		echo "  Provider: proxy not reachable. Attempting to start..."
+		# Optionally try to load the LaunchAgent if not already loaded
+		if ! launchctl list | grep -q "com.clanker.provider-proxy"; then
+			launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.clanker.provider-proxy.plist 2>/dev/null
+		fi
+		# Wait a moment for it to come up
+		sleep 5   # TODO: replace this with a loop
+		if check_proxy; then
+			echo "  Provider: TCP proxy started"
+			CLANKER_PROVIDER_MODE="tcp"
+			CLANKER_PROVIDER_ENDPOINT="http://host.docker.internal:11434"
+		else
+			echo "  Provider: OFFLINE (could not start proxy)"
+			CLANKER_PROVIDER_MODE="offline"
+			CLANKER_PROVIDER_ENDPOINT=""
+		fi
+	fi
+	CLANKER_PROVIDER_SOCKET=""
+else 
+	# Assume Linux for now 
+	if [[ -S "${PROVIDER_SOCKET}" ]]; then
+		CLANKER_PROVIDER_MODE="socket" 
+		CLANKER_PROVIDER_SOCKET="/var/run/provider.sock"
+	else
+		systemctl --user start clanker-proxy.service 2>/dev/null
+		sleep 0.5
+		if [[ -S "${PROVIDER_SOCKET}" ]]; then
+			CLANKER_PROVIDER_MODE="socket" 
+			CLANKER_PROVIDER_SOCKET="/var/run/provider.sock"
+		else
+			CLANKER_PROVIDER_MODE="offline"
+		fi
+	fi
+	CLANKER_PROVIDER_ENDPOINT=""
+fi
+
+echo "Using provider [${CLANKER_PROVIDER_MODE}] via ${CLANKER_PROVIDER_ENDPOINT} ${CLANKER_PROVIDER_SOCKET}" >&2
+
 
 # Service name
 PROXY_SERVICE="com.clanker.provider-proxy"   # For launchd
