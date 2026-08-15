@@ -141,37 +141,73 @@ def execute_tool(name: str, args: dict) -> str:
     else:
         return f"Unknown tool: {name}"
 
+
 # ─── LLM Client (provider-agnostic) ──────────────────────────
 def get_client():
-    socket_path = Path(os.environ.get("CLANKER_PROVIDER_SOCKET", "/mnt/provider/provider.sock"))
-    
-    print(f"Socket path: {socket_path}", file=sys.stderr)
-    print(f"Socket exists: {socket_path.exists()}", file=sys.stderr)
-    
-    if not socket_path.exists():
-        raise RuntimeError(f"Socket not found at {socket_path}")
-    
-    transport = httpx.HTTPTransport(
-        uds=str(socket_path),
-        retries=0,
-    )
-    
-    client = httpx.Client(
-        transport=transport,
-        base_url="http://localhost",
-        timeout=60,
-    )
-    
-    # Test the connection
+    mode = os.environ.get("CLANKER_PROVIDER_MODE", "socket").lower()
+
+    if mode == "tcp":
+        # TCP mode: proxy runs on host, container reaches it via host.docker.internal
+        endpoint = os.environ.get(
+            "CLANKER_PROVIDER_ENDPOINT",
+            "http://host.docker.internal:11434",
+        )
+        print(f"Provider mode: tcp, endpoint: {endpoint}", file=sys.stderr)
+        client = httpx.Client(base_url=endpoint, timeout=60)
+
+    elif mode == "direct":
+        # Direct API access (no proxy), expects API key inside container
+        api_key = os.environ.get("DEEPSEEK_API_KEY", "")
+        if not api_key:
+            raise RuntimeError("DEEPSEEK_API_KEY not set for direct mode")
+        endpoint = os.environ.get(
+            "CLANKER_PROVIDER_ENDPOINT",
+            "https://api.deepseek.com/v1",
+        )
+        print(f"Provider mode: direct, endpoint: {endpoint}", file=sys.stderr)
+        client = httpx.Client(
+            base_url=endpoint,
+            headers={"Authorization": f"Bearer {api_key}"},
+            timeout=60,
+        )
+
+    elif mode == "socket":
+        # Unix socket mode: proxy on host, socket mounted into container
+        socket_path = Path(
+            os.environ.get("CLANKER_PROVIDER_SOCKET", "/var/run/provider.sock")
+        )
+        print(f"Provider mode: socket, path: {socket_path}", file=sys.stderr)
+        if not socket_path.exists():
+            raise RuntimeError(f"Socket not found at {socket_path}")
+        transport = httpx.HTTPTransport(uds=str(socket_path), retries=0)
+        client = httpx.Client(
+            transport=transport,
+            base_url="http://localhost",
+            timeout=60,
+        )
+        # Note: endpoint is the socket proxy's base; no need for host.docker.internal
+
+    else:
+        raise RuntimeError(f"Unknown provider mode: {mode}")
+
+    # Optional connectivity test (remove if you don't want to waste tokens)
     try:
         response = client.post(
-            "http://localhost/chat/completions",
-            json={"model": "deepseek-chat", "messages": [{"role": "user", "content": "test"}]},
+            "/chat/completions",
+            json={
+                "model": os.environ.get("CLANKER_MODEL", "deepseek-chat"),
+                "messages": [{"role": "user", "content": "ping"}],
+                "max_tokens": 1,
+                "stream": False,
+            },
         )
         print(f"Test connection: {response.status_code}", file=sys.stderr)
+        # Drain response to avoid connection reuse issues
+        _ = response.content
     except Exception as e:
         print(f"Test connection failed: {e}", file=sys.stderr)
-    
+        # Don't raise; the client will fail later if truly unreachable
+
     return client
 
 
