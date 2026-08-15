@@ -1,6 +1,14 @@
 # Ignore make directory 
 .make/
 
+# Ignore any python junk
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
 
 # Added by cargo
 

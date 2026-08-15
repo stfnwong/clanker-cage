@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 """agent-loop: The beating heart of clanker."""
+
 import argparse
 import json
 import os
 import subprocess
 import sys
-from pathlib import Path
 from typing import Callable, Iterable, Literal
+from datetime import datetime, timezone
+from pathlib import Path
 
 import socket
 import httpx  # pip install httpx
@@ -16,6 +18,7 @@ SKILLS_PATH = Path(os.environ.get("CLANKER_SKILLS_PATH", "/etc/clanker/skills"))
 WORKSPACE = Path("/workspace")
 PROVIDER_SOCKET = Path(os.environ.get("CLANKER_PROVIDER_SOCKET", "/mnt/provider/clanker/provider.sock"))
 PROVIDER_MODE = os.environ.get("CLANKER_PROVIDER_MODE", "socket")  # "socket", "direct", "offline"
+
 
 # ─── Tool Definitions (for the LLM's function-calling) ──────
 TOOLS = [
@@ -77,6 +80,8 @@ TOOLS = [
         },
     },
 ]
+
+
 
 
 # ─── Tool Execution (sandboxed) ──────────────────────────────
@@ -230,6 +235,16 @@ When editing files, use precise diffs."""
     return base
 
 
+# ─── Turn logging ──────────────────────────────
+def _log_event(session_file: Path, event_type: str, **kwargs) -> None:
+    with session_file.open("a") as f:
+        f.write(json.dumps({
+            "ts": datetime.now(timezone.utc).isoformat(),
+            "type": event_type,
+            **kwargs
+        }) + "\n")
+
+
 # ─── The Agent Loop ──────────────────────────────────────────
 def run_agent(
     prompt: str, 
@@ -238,13 +253,26 @@ def run_agent(
     use_stream: bool=True, 
     verbose:bool=False,
     max_turns: int=30,
+    session_file: Path | None = None,
 ) -> str:
+
+    start = datetime.now()
+
+    if session_file:
+        _log_event(
+            session_file, 
+            "session_start", 
+            project=os.environ.get("CLANKER_PROJECT_NAME", "unknown"),
+            session_id=os.environ.get("CLANKER_PROJECT_NAME", "unknown"),
+        )
+
     client = get_client()
     messages = [
         {"role": "system", "content": build_system_prompt()},
         {"role": "user", "content": prompt},
     ]
     turn = 0
+    total_usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
     while turn < max_turns:  # safety limit
         turn += 1
         # Prepare request
@@ -262,8 +290,13 @@ def run_agent(
         # Stream response
         full_content = ""
         tool_calls = []
+        turn_usage = {}
+
+        if session_file:
+            _log_event(session_file, "user", content=prompt)
 
         # Need full URL here
+        # TODO: refactor this loop as its a pain to read...
         with client.stream("POST", "/chat/completions", json=body, timeout=120) as response:
             for n, line in enumerate(response.iter_lines()):
                 if verbose:
@@ -281,6 +314,10 @@ def run_agent(
                         chunk = json.loads(data)
                     except json.JSONDecodeError:
                         continue
+                    # DeepSeek/OpenAI streaming APIs include cumulative usage on the
+                    # final data chunk of each response.
+                    if "usage" in chunk and chunk["usage"]:
+                        turn_usage = dict(chunk["usage"])
                     delta = chunk["choices"][0]["delta"]
                     if "content" in delta and delta["content"]:
                         full_content += delta["content"]
@@ -302,14 +339,32 @@ def run_agent(
                                     tool_calls[idx]["function"]["name"] += tc_delta["function"]["name"]
                                 if "arguments" in tc_delta["function"]:
                                     tool_calls[idx]["function"]["arguments"] += tc_delta["function"]["arguments"]
+
+                        if session_file:
+                            _log_event(
+                                session_file, 
+                                "assistant", 
+                                content=full_content or None,
+                                tool_calls=tool_calls or None,
+                            )
+
                 # ==== Non-streaming mode
                 else:
                     chunk = json.loads(line)
+                    if "usage" in chunk and chunk["usage"]:
+                        turn_usage = dict(chunk["usage"])
                     message = chunk["choices"][0]["message"]
                     if "content" in message and message["content"]:
                         full_content += message["content"]
                         stream_to(message["content"])
                     # TODO: Add support for tool calls in non-streaming mode
+
+        # Log token usage for this call/turn (if the provider returned it)
+        if turn_usage and session_file:
+            _log_event(session_file, "llm_call", turn=turn, usage=turn_usage)
+        if turn_usage:
+            for k in ("prompt_tokens", "completion_tokens", "total_tokens"):
+                total_usage[k] = total_usage.get(k, 0) + turn_usage.get(k, 0)
 
         # After stream, decide next step
         if full_content and not tool_calls:
@@ -345,6 +400,15 @@ def run_agent(
 
     if verbose:
         print(f"full_content: {full_content}")
+
+    elapsed = datetime.now() - start
+    if session_file:
+        _log_event(
+            session_file, "session_end",
+            duration_seconds=elapsed,
+            turns=turn,
+            usage=total_usage,
+        )
 
     return full_content
 

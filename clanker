@@ -34,6 +34,18 @@ if [[ ! -d "${PROJECT_ROOT}" ]]; then
     exit 1
 fi
 
+# Get rid of inconvenient characters in project name
+sanitize_project_name() {
+    local name="$1"
+    # Replace anything not alphanumeric, dash, underscore with underscore
+    echo "$name" | sed 's/[^a-zA-Z0-9_-]/_/g'
+}
+PROJECT_NAME="$(sanitize_project_name "$(basename "$PROJECT_ROOT")")"
+
+# ─── Session (for history) ───────────────────────────────────────────────
+SESSION_ID="$(date +%Y%m%d-%H%M%S)-$$"
+SESSION_FILE="${CLANKER_CACHE}/sessions/${PROJECT_NAME}/${SESSION_ID}.jsonl"
+
 # Write container name for neovim plugin
 echo "$CONTAINER_NAME" > "${CLANKER_CACHE}/current-container"
 trap 'rm -f "${CLANKER_CACHE}/current-container"' EXIT
@@ -119,6 +131,7 @@ MOUNTS=(
     -v "${PROJECT_ROOT}:/workspace:${MOUNT_OPTS}"
     -v "${CLANKER_CACHE}/pip:/home/clanker/.cache/pip:rw"
     -v "${CLANKER_CACHE}/npm:/home/clanker/.cache/npm:rw"
+    -v "${CLANKER_CACHE}/sessions:/home/clanker/.clanker/sessions:rw"
     -v "${GLOBAL_SKILLS}:/etc/clanker/skills:ro"
 )
 
@@ -152,7 +165,8 @@ ENV_VARS=(
     -e CLANKER_PROVIDER_ENDPOINT="${CLANKER_PROVIDER_ENDPOINT}"
     -e CLANKER_MODEL="${CLANKER_MODEL:-deepseek-chat}"
     -e CLANKER_PROVIDER_KEY_FILE="/run/secrets/provider.key"
-    -e CLANKER_PROJECT_NAME="$(basename "${PROJECT_ROOT}")"
+    -e CLANKER_PROJECT_NAME="$(basename "${PROJECT_NAME}")"
+    #-e CLANKER_PROJECT_NAME="$(basename "${PROJECT_ROOT}")"
     -e CLANKER_SESSION_ID="${CONTAINER_NAME}"
     -e CLANKER_UID="$(id -u)"
     -e CLANKER_GID="$(id -g)"
