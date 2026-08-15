@@ -8,6 +8,7 @@ import subprocess
 import sys
 from typing import Callable, Iterable, Literal
 from datetime import datetime, timezone
+import time
 from pathlib import Path
 
 import socket
@@ -256,7 +257,7 @@ def run_agent(
     session_file: Path | None = None,
 ) -> str:
 
-    start = datetime.now()
+    start = time.perf_counter()
 
     if session_file:
         _log_event(
@@ -401,7 +402,7 @@ def run_agent(
     if verbose:
         print(f"full_content: {full_content}")
 
-    elapsed = datetime.now() - start
+    elapsed = time.perf_counter() - t0
     if session_file:
         _log_event(
             session_file, "session_end",
@@ -412,31 +413,101 @@ def run_agent(
 
     return full_content
 
+
+
+# ─── Session management ───────────────────────────────────────────────
+def list_sessions(project_sessions_dir: Path):
+    """Print available session files for the current project."""
+
+    if not project_sessions_dir.exists():
+        print(f"No sessions found in {project_sessions_dir}")
+        return
+    files = sorted(project_sessions_dir.glob("*.jsonl"))
+    if not files:
+        print(f"No session files in {project_sessions_dir}")
+        return
+    print(f"Sessions for {project_sessions_dir.parent.name}/{project_sessions_dir.name}:")
+    for f in files:
+        # Read the first and last event to show a summary
+        try:
+            with f.open("r") as fh:
+                first_line = fh.readline()
+                # Read last non-empty line
+                last_line = ""
+                for line in fh:
+                    if line.strip():
+                        last_line = line
+            first_event = json.loads(first_line) if first_line else {}
+            last_event = json.loads(last_line) if last_line else {}
+            first_ts = first_event.get("ts", "?")
+            last_ts = last_event.get("ts", "?")
+            first_type = first_event.get("type", "?")
+            last_type = last_event.get("type", "?")
+            print(f"  {f.name}  [{first_ts} → {last_ts}]  ({first_type} → {last_type})")
+        except Exception as e:
+            print(f"  {f.name}  [unreadable: {e}]")
+
+
+
 # ─── CLI Modes ───────────────────────────────────────────────
 def main():
     parser = argparse.ArgumentParser(description="Clanker agent loop")
-    parser.add_argument("prompt", nargs="*", help="User prompt (for oneshot or interactive)")
-    parser.add_argument("--pipe", action="store_true", help="Read context from stdin, prompt as argument")
-    parser.add_argument("--json", action="store_true", help="JSON protocol for Neovim integration")
-    parser.add_argument("--oneshot", action="store_true", help="Single question, no tool calls (just append 'Answer concisely')")
-    parser.add_argument("--verbose", action="store_true", help="Set verbose mode", default=False)
+    parser.add_argument("prompt", nargs="*", help="User prompt")
+    parser.add_argument("--pipe", action="store_true", help="Read context from stdin")
+    parser.add_argument("--json", action="store_true", help="JSON protocol mode")
+    parser.add_argument("--oneshot", action="store_true", help="Single question, no tools")
+    parser.add_argument("--resume", metavar="SESSION_FILE", help="Resume from a session JSONL file")
+    parser.add_argument("--list-sessions", action="store_true", help="List available session files")
     args = parser.parse_args()
 
+    # ─── Session file handling ─────────────────────────────
+    sessions_dir = Path(os.environ.get(
+        "CLANKER_SESSIONS_DIR",
+        str(Path.home() / ".clanker" / "sessions")
+    ))
+    project_name = os.environ.get("CLANKER_PROJECT_NAME", "unknown")
+    project_sessions_dir = sessions_dir / project_name
+
+    if args.list_sessions:
+        list_sessions(project_sessions_dir)
+        return
+
+    session_file = None
+    if args.resume:
+        # Resume from a specific file
+        resume_path = Path(args.resume)
+        if not resume_path.is_absolute():
+            resume_path = project_sessions_dir / resume_path
+        if not resume_path.exists():
+            print(f"Session file not found: {resume_path}", file=sys.stderr)
+            sys.exit(1)
+        session_file = resume_path
+        print(f"Resuming session: {session_file}", file=sys.stderr)
+    else:
+        # Create a new session file
+        project_sessions_dir.mkdir(parents=True, exist_ok=True)
+        session_id = f"{datetime.now().strftime('%Y%m%d-%H%M%S')}-{os.getpid()}"
+        session_file = project_sessions_dir / f"{session_id}.jsonl"
+        # Touch the file to ensure it exists
+        session_file.touch()
+        print(f"New session: {session_file}", file=sys.stderr)
+
+    # ─── Dispatch based on mode ────────────────────────────
     if args.json:
-        # JSON mode for neovim: read JSON request, stream JSON events back
-        run_json_mode()
+        run_json_mode(session_file)
         return
 
     if args.pipe:
         context = sys.stdin.read()
         prompt = " ".join(args.prompt)
         full_prompt = f"Context:\n{context}\n\n---\n\nInstruction: {prompt}"
-        run_agent(full_prompt, stream_to=lambda s, end="": print(s, end=end, flush=True), verbose=args.verbose)
+        run_agent(full_prompt, session_file=session_file)
         return
 
     if args.oneshot:
         prompt = " ".join(args.prompt)
-        run_agent(prompt + " (Provide a concise answer without using tools.)", mode="oneshot", verbose=args.verbose)
+        run_agent(prompt + " (Provide a concise answer without using tools.)",
+                  session_file=session_file, mode="oneshot")
         return
 
     # Default interactive mode
@@ -444,8 +515,7 @@ def main():
         prompt = " ".join(args.prompt)
     else:
         prompt = input("clanker> ")
-    run_agent(prompt, verbose=args.verbose)
-
+    run_agent(prompt, session_file=session_file)
 
 def run_json_mode():
     """Read JSON request from stdin, process, write JSON responses to stdout."""
