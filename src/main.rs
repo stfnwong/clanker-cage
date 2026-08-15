@@ -6,10 +6,12 @@ use std::env;
 use std::path::PathBuf;
 use tokio::net::{TcpListener, UnixListener};
 
+
 const API_KEY_ENV: &str = "DEEPSEEK_API_KEY";
 const BASE_URL: &str = "https://api.deepseek.com/v1/chat/completions";
 const DEFAULT_PORT: u16 = 11434;
 const DEFAULT_SOCKET: &str = "~/.cache/clanker/provider.sock";
+
 
 fn expand_tilde(path: &str) -> PathBuf {
     if let Some(stripped) = path.strip_prefix("~/") {

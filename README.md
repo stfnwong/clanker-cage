@@ -4,7 +4,105 @@ Container image to hold an agent.
 
 This repo is just a docker image that in which I want to run agents. The reason I want this is to be able to control agent access to other things on my laptop. For now this is specialised around `Claude` because thats what I have a subscription for but the idea would be to generalise this somewhat as time goes by.
 
-TODO: I would actually like to put some sort of harness together for this
+
+## Overview 
+
+The idea is something like this 
+
+```
+┌─────────────────────────────────────────────────────────────────────────────────┐
+│                              HOST MACHINE                                       │
+│                                                                                 │
+│  ┌────────────────────┐    ┌────────────────────┐    ┌────────────────────┐     │
+│  │     Neovim         │    │     Terminal       │    │   User Service     │     │
+│  │  clanker.nvim      │    │                    │    │  (LaunchAgent /    │     │
+│  │  plugin            │    │  $ clanker         │    │   systemd unit)    │     │
+│  └─────────┬──────────┘    └─────────┬──────────┘    └─────────┬──────────┘     │
+│            │                         │                         │                │
+│            │ docker exec             │ docker run              │ manages        │
+│            │ (reads pointer file)    │ (builds image,          │                │
+│            │                         │  mounts project,        │                │
+│            │                         │  sets env, launches)    │                │
+│            │                         │                         │                │
+│            │                         ▼                         ▼                │
+│            │                ┌─────────────────────────────────────────────┐     │
+│            │                │           Provider Proxy (Rust)             │     │
+│            │                │                                             │     │
+│            │                │   Linux: Unix socket                        │     │
+│            │                │     ~/.cache/clanker/provider.sock          │     │
+│            │                │                                             │     │
+│            │                │   macOS: TCP 0.0.0.0:11434                  │     │
+│            │                │                                             │     │
+│            │                │   Holds DEEPSEEK_API_KEY                    │     │
+│            │                │   /health endpoint                          │     │
+│            │                └──────────────────────┬──────────────────────┘     │
+│            │                                       │                            │
+│            │                        API calls (streaming)                       │
+│            │                                       │                            │
+└────────────┼───────────────────────────────────────┼────────────────────────────┘
+             │                                       │
+             │                                       ▼
+             │                          ┌─────────────────────────┐
+             │                          │      DeepSeek API       │
+             │                          │  api.deepseek.com/v1    │
+             │                          └─────────────────────────┘
+             │
+             │  (docker exec -i <container> agent-loop ...)
+             │
+┌────────────▼─────────────────────────────────────────────────────────────────────┐
+│                          CONTAINER (clanker:latest)                              │
+│                                                                                  │
+│  ┌─────────────────────────────────────────────────────────────────────────┐     │
+│  │                              /workspace                                 │     │
+│  │                       (project mounted read-write)                      │     │
+│  └─────────────────────────────────────────────────────────────────────────┘     │
+│                                                                                  │
+│  ┌─────────────────────────────────────────────────────────────────────────┐     │
+│  │                           agent-loop.py                                 │     │
+│  │                                                                         │     │
+│  │   ┌──────────────┐    ┌──────────────┐    ┌──────────────────┐          │     │
+│  │   │  Construct   │───▶│  Call LLM    │───▶│  Parse Response  │          │     │
+│  │   │  Messages    │    │  (streaming) │    │                  │          │     │
+│  │   └──────────────┘    └──────┬───────┘    └────────┬─────────┘          │     │
+│  │                              │                     │                    │     │
+│  │                              │                     │ Tool calls?        │     │
+│  │                              │                     ▼                    │     │
+│  │   ┌──────────────┐    ┌──────▼───────┐    ┌──────────────────┐          │     │
+│  │   │  Execute Tool│◀───┤  Tool Loop   │    │  Final Answer    │          │     │
+│  │   │  (read_file, │    │              │    │  (text response) │          │     │
+│  │   │   run_shell, │    └──────────────┘    └──────────────────┘          │     │
+│  │   │   search,    │                                                      │     │
+│  │   │   list)      │                                                      │     │
+│  │   └──────────────┘                                                      │     │
+│  └─────────────────────────────────────────────────────────────────────────┘     │
+│                                                                                  │
+│  ┌─────────────────────────────────────────────────────────────────────────┐     │
+│  │                        Provider Connection                              │     │
+│  │                                                                         │     │
+│  │   Linux: /var/run/provider.sock (mounted from host)                     │     │
+│  │   macOS: http://host.docker.internal:11434 (TCP)                        │     │
+│  │                                                                         │     │
+│  │   Mode set by CLANKER_PROVIDER_MODE env var                             │     │
+│  └─────────────────────────────────────────────────────────────────────────┘     │
+│                                                                                  │
+│  ┌─────────────────────────────────────────────────────────────────────────┐     │
+│  │                     Skills & Configuration                              │     │
+│  │                                                                         │     │
+│  │   /etc/clanker/skills/SKILL.md          (global, from image)            │     │
+│  │   /workspace/.clanker/skills/SKILL.md   (project-specific, if exists)   │     │
+│  │   /workspace/.clanker/config            (project config)                │     │
+│  └─────────────────────────────────────────────────────────────────────────┘     │
+│                                                                                  │
+│  ┌─────────────────────────────────────────────────────────────────────────┐     │
+│  │                          User & Permissions                             │     │
+│  │                                                                         │     │
+│  │   entrypoint.sh: adapts UID/GID to match host                           │     │
+│  │   gosu: drops privileges to clanker user                                │     │
+│  │   /run/secrets/provider.key: mounted tmpfs (if direct API mode)         │     │
+│  └─────────────────────────────────────────────────────────────────────────┘     │
+│                                                                                  │
+└──────────────────────────────────────────────────────────────────────────────────┘
+```
 
 
 ## Usage 
