@@ -340,7 +340,7 @@ def _drain_nonstream(client, body, stream_to, verbose) -> TurnResult:
     return result
 
 
-def _run_tool_calls(tool_calls, messages, stream_to, content=None) -> None:
+def _run_tool_calls(tool_calls, messages, stream_to, content=None, session_file=None) -> None:
     """Append the assistant msg + execute each tool, appending tool results."""
     messages.append({
         "role": "assistant",
@@ -355,6 +355,14 @@ def _run_tool_calls(tool_calls, messages, stream_to, content=None) -> None:
         result = execute_tool(fn_name, fn_args)
         if len(result) > 8000:
             result = result[:8000] + "\n... [truncated]"
+        if session_file:
+            _log_event(
+                session_file,
+                "tool",
+                name=fn_name,
+                tool_call_id=tc.get("id"),
+                content=result,
+            )
         messages.append({
             "role": "tool",
             "type": "tool",
@@ -372,6 +380,7 @@ def run_agent(
     verbose: bool = False,
     max_turns: int = 30,
     session_file: Path | None = None,
+    initial_messages: list | None = None,
 ) -> str:
 
     started = time.perf_counter()
@@ -385,17 +394,24 @@ def run_agent(
         )
 
     client = get_client()
-    messages = [
-        {"role": "system", "content": build_system_prompt()},
-        {"role": "user", "content": prompt},
-    ]
+    if initial_messages:
+        # Continue an existing conversation: keep its history, then append the
+        # new user turn on top.
+        messages = list(initial_messages)
+        messages.append({"role": "user", "content": prompt})
+    else:
+        messages = [
+            {"role": "system", "content": build_system_prompt()},
+            {"role": "user", "content": prompt},
+        ]
     total_usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
     final = ""
 
-    for turn in range(1, max_turns + 1):  # safety limit
-        if session_file:
-            _log_event(session_file, "user", content=prompt)
+    # Persist the user prompt once (not once per turn).
+    if session_file:
+        _log_event(session_file, "user", content=prompt)
 
+    for turn in range(1, max_turns + 1):  # safety limit
         body = _make_request_body(messages, use_stream)
         if verbose:
             print(f"Sending to proxy: {json.dumps(body)}", file=sys.stderr)
@@ -427,7 +443,8 @@ def run_agent(
             break
 
         if result.tool_calls:
-            _run_tool_calls(result.tool_calls, messages, stream_to, content=result.content)
+            _run_tool_calls(result.tool_calls, messages, stream_to,
+                            content=result.content, session_file=session_file)
         else:
             # No content and no tools: nothing useful arrived; bail out.
             final = result.content
@@ -482,6 +499,75 @@ def list_sessions(project_sessions_dir: Path):
 
 
 
+def load_session_history(session_file: Path) -> list:
+    """Reconstruct the ordered message history from a session JSONL file.
+
+    Replays the saved conversation (user prompts, assistant replies including
+    tool_calls, and tool results) so a follow-up run can continue with full
+    context. Returns a list of OpenAI-formatted messages (not system-prefixed).
+
+    Older session files (recorded before tool results were logged) contain
+    assistant tool_calls with no matching tool results. Such turns cannot be
+    resent to the API as-is, so they are dropped from the replay.
+    """
+    history: list = []
+    pending: dict | None = None      # buffered assistant msg awaiting tool results
+    pending_needed = 0               # how many tool results it still needs
+
+    def flush_pending():
+        nonlocal pending, pending_needed
+        if pending is not None:
+            if pending_needed == 0:
+                history.append(pending)
+            pending = None
+            pending_needed = 0
+
+    for line in session_file.open("r"):
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            ev = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        etype = ev.get("type")
+        if etype == "user":
+            flush_pending()  # a new user turn ends any unresolved tool block
+            history.append({"role": "user", "content": ev.get("content", "")})
+        elif etype == "assistant":
+            flush_pending()
+            msg = {"role": "assistant", "content": ev.get("content")}
+            tcs = ev.get("tool_calls") or []
+            if tcs:
+                new_list = []
+                for tc in tcs:
+                    if not tc.get("id"):
+                        continue
+                    new_list.append(tc)
+                if new_list:
+                    msg["tool_calls"] = new_list
+                    pending = msg
+                    pending_needed = len(new_list)
+                    continue
+            history.append(msg)
+        elif etype == "tool":
+            if pending is not None:
+                history.append({
+                    "role": "tool",
+                    "tool_call_id": ev.get("tool_call_id"),
+                    "content": ev.get("content", ""),
+                })
+                pending_needed -= 1
+                if pending_needed <= 0:
+                    flush_pending()
+    flush_pending()
+
+    # Drop a leading system prompt if one was ever recorded.
+    if history and history[0].get("role") == "system":
+        history = history[1:]
+    return history
+
+
 # ─── CLI Modes ───────────────────────────────────────────────
 def main():
     parser = argparse.ArgumentParser(description="Clanker agent loop")
@@ -505,7 +591,8 @@ def main():
         list_sessions(project_sessions_dir)
         return
 
-    session_file = None
+    session_file: Path | None = None
+    resumed_messages: list | None = None
     if args.resume:
         # Resume from a specific file
         resume_path = Path(args.resume)
@@ -515,7 +602,10 @@ def main():
             print(f"Session file not found: {resume_path}", file=sys.stderr)
             sys.exit(1)
         session_file = resume_path
-        print(f"Resuming session: {session_file}", file=sys.stderr)
+        # Replay the saved conversation so this run continues with full context.
+        resumed_messages = load_session_history(session_file)
+        print(f"Resuming session: {session_file} "
+              f"({len(resumed_messages)} messages replayed)", file=sys.stderr)
     else:
         # Create a new session file
         project_sessions_dir.mkdir(parents=True, exist_ok=True)
@@ -527,20 +617,21 @@ def main():
 
     # ─── Dispatch based on mode ────────────────────────────
     if args.json:
-        run_json_mode(session_file)
+        run_json_mode(session_file, resumed_messages)
         return
 
     if args.pipe:
         context = sys.stdin.read()
         prompt = " ".join(args.prompt)
         full_prompt = f"Context:\n{context}\n\n---\n\nInstruction: {prompt}"
-        run_agent(full_prompt, session_file=session_file)
+        run_agent(full_prompt, session_file=session_file, initial_messages=resumed_messages)
         return
 
     if args.oneshot:
         prompt = " ".join(args.prompt)
         run_agent(prompt + " (Provide a concise answer without using tools.)",
-                  session_file=session_file, mode="oneshot")
+                  session_file=session_file, mode="oneshot",
+                  initial_messages=resumed_messages)
         return
 
     # Default interactive mode
@@ -548,14 +639,20 @@ def main():
         prompt = " ".join(args.prompt)
     else:
         prompt = input("clanker> ")
-    run_agent(prompt, session_file=session_file)
+    run_agent(prompt, session_file=session_file, initial_messages=resumed_messages)
 
-def run_json_mode():
+def run_json_mode(session_file: Path | None = None, resumed_messages: list | None = None):
     """Read JSON request from stdin, process, write JSON responses to stdout."""
     try:
         request = json.loads(sys.stdin.read())
     except Exception:
         return
+    if session_file is None:
+        # No session file selected (e.g. manual call): make a scratch one.
+        session_file = Path(os.environ.get(
+            "CLANKER_SESSIONS_DIR",
+            str(Path.home() / ".clanker" / "sessions")
+        )) / os.environ.get("CLANKER_PROJECT_NAME", "unknown") / "json.log"
     prompt = request.get("prompt", "")
     context = request.get("context", "")
     full_prompt = prompt
@@ -567,7 +664,8 @@ def run_json_mode():
         sys.stdout.write(json.dumps({"type": "text", "content": text + end}) + "\n")
         sys.stdout.flush()
 
-    run_agent(full_prompt, stream_to=stream_callback, verbose=args.verbose)
+    run_agent(full_prompt, stream_to=stream_callback, session_file=session_file,
+              initial_messages=resumed_messages)
     sys.stdout.write(json.dumps({"type": "finished"}) + "\n")
 
 if __name__ == "__main__":
