@@ -157,6 +157,130 @@ SCRIPT_DIR="$(cd -P "$(dirname "${SCRIPT_PATH}")" >/dev/null 2>&1 && pwd)"
 # The proxy binary lives alongside the repo (built by make)
 PROXY_BINARY="${SCRIPT_DIR}/target/release/clanker-provider-proxy"
 
+
+# ─── Auto-start provider if proxy isn't running ──────────────
+#PROXY_ENDPOINT="http://127.0.0.1:11434"
+#
+#check_proxy() {
+#    curl -fsS --max-time 2 "${PROXY_ENDPOINT}/health" >/dev/null 2>&1
+#}
+#
+#if check_proxy; then
+#    echo "  Provider: TCP proxy running"
+#    ENV_VARS+=(
+#        -e CLANKER_PROVIDER_MODE="tcp"
+#        -e CLANKER_PROVIDER_ENDPOINT="http://host.docker.internal:11434"
+#    )
+#else
+#    echo "  Provider: proxy not reachable. Attempting to start..."
+#    # Optionally try to load the LaunchAgent if not already loaded
+#    if ! launchctl list | grep -q "com.clanker.provider-proxy"; then
+#        launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.clanker.provider-proxy.plist 2>/dev/null
+#    fi
+#    # Wait a moment for it to come up
+#    sleep 1
+#    if check_proxy; then
+#        echo "  Provider: TCP proxy started"
+#        ENV_VARS+=(
+#            -e CLANKER_PROVIDER_MODE="tcp"
+#            -e CLANKER_PROVIDER_ENDPOINT="http://host.docker.internal:11434"
+#        )
+#    else
+#        echo "  Provider: OFFLINE (could not start proxy)"
+#        ENV_VARS+=(-e CLANKER_PROVIDER_MODE="offline")
+#    fi
+#fi
+
+# Service name
+PROXY_SERVICE="com.clanker.provider-proxy"   # For launchd
+# For systemd, use user unit name: clanker-proxy.service
+
+proxy_running() {
+    if [[ "$UNAME_S" == "Darwin" ]]; then
+        launchctl list | grep -q "$PROXY_SERVICE"
+    else
+        systemctl --user is-active --quiet clanker-proxy.service
+    fi
+}
+
+proxy_start() {
+    if [[ "$UNAME_S" == "Darwin" ]]; then
+        # If not loaded, bootstrap it
+        launchctl list "$PROXY_SERVICE" >/dev/null 2>&1 || \
+            launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/$PROXY_SERVICE.plist
+        launchctl kickstart -k gui/$(id -u)/$PROXY_SERVICE
+    else
+        systemctl --user start clanker-proxy.service
+    fi
+}
+
+proxy_stop() {
+    if [[ "$UNAME_S" == "Darwin" ]]; then
+        launchctl bootout gui/$(id -u)/$PROXY_SERVICE 2>/dev/null || true
+    else
+        systemctl --user stop clanker-proxy.service
+    fi
+}
+
+proxy_health_check() {
+    # Use curl to hit the health endpoint (TCP mode) or check socket
+    if [[ "$UNAME_S" == "Darwin" ]]; then
+        curl -fsS --max-time 2 "http://127.0.0.1:11434/health" >/dev/null 2>&1
+    else
+        # Check Unix socket existence (the service creates it)
+        [[ -S "${HOME}/.cache/clanker/provider.sock" ]]
+    fi
+}
+
+# Default: start proxy if needed
+START_PROXY=true
+STOP_PROXY_ON_EXIT=false
+
+# Parse arguments
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --stop-proxy)
+            STOP_PROXY_ON_EXIT=true
+            START_PROXY=true
+            shift
+            ;;
+        --no-proxy)
+            START_PROXY=false
+            shift
+            ;;
+        --start-proxy)
+            START_PROXY=true
+            shift
+            ;;
+        *)
+            break
+            ;;
+    esac
+done
+
+# Start proxy if requested and not already running
+if [[ "$START_PROXY" == true ]]; then
+    if ! proxy_health_check; then
+        echo "  Proxy not running. Starting service..."
+        proxy_start
+        # Wait for health
+        for i in {1..10}; do
+            sleep 0.5
+            if proxy_health_check; then
+                echo "  Proxy is up."
+                break
+            fi
+        done
+        if ! proxy_health_check; then
+            echo "  WARNING: Proxy failed to start. Agent will be offline." >&2
+            START_PROXY=false
+        fi
+    else
+        echo "  Proxy already running."
+    fi
+fi
+
+# ... set up mounts, env, etc.
 # ─── Auto-start provider if proxy isn't running ──────────────
 # TODO: while testing on OSX don't try to autostart the proxy
 #if [[ ! -S "${CLANKER_PROVIDER_SOCKET}" ]]; then
@@ -231,7 +355,8 @@ echo "║  Type 'exit' to leave, Ctrl-D to detach                  "
 echo "╚═══════════════════════════════════════════════════════════"
 
 
-exec docker run \
+# Run container (do NOT use exec if we need cleanup)
+docker run \
     --rm \
     --name "${CONTAINER_NAME}" \
     --hostname clanker \
@@ -243,3 +368,13 @@ exec docker run \
     -it \
     "${IMAGE_TAG}" \
     /bin/bash --rcfile /etc/clanker/bashrc
+
+STATUS=$?
+
+# If requested, stop the proxy after session
+if [[ "$STOP_PROXY_ON_EXIT" == true ]] && [[ "$START_PROXY" == true ]]; then
+    echo "  Stopping proxy service..."
+    proxy_stop
+fi
+
+exit $STATUS
