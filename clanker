@@ -1,238 +1,64 @@
 #!/usr/bin/env bash
-# clanker - Drop into an isolated agent environment for the current project
 set -euo pipefail
 
-
 # ─── Configuration ───────────────────────────────────────────
-# This script lives in the clanker repo. It finds its own directory
-# to locate the Dockerfile and supporting files.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-
-# Detect OS
-UNAME_S="$(uname -s)"
-
-# Script version
-VERSION_FILE="${SCRIPT_DIR}/.version"
-if [[ -f "${VERSION_FILE}" ]]; then
-    VERSION="$(cat "${VERSION_FILE}")"
-else
-    VERSION="$(git -C "${SCRIPT_DIR}" rev-parse --short HEAD 2>/dev/null || echo "dev")"
-fi
-
-# Implement a version argument
-if [[ "${1:-}" == "--version" ]]; then
-    echo "clanker ${VERSION}"
-    echo "repo: ${SCRIPT_DIR}"
-    echo "image: ${IMAGE_TAG}"
-    exit 0
-fi
-
+VERSION="$(git -C "${SCRIPT_DIR}" rev-parse --short HEAD 2>/dev/null || echo "dev")"
 IMAGE_TAG="clanker:latest"
 CONTAINER_NAME="clanker-$(date +%Y%m%d-%H%M%S)-$$"
-# Write container name to a file on startup
-echo "$CONTAINER_NAME" > "$HOME/.cache/clanker/current-container"
-
-# Paths that exist on the host
 PROJECT_ROOT="${CLANKER_PROJECT:-$(pwd)}"
-
-SKILLS_DIR="${CLANKER_SKILLS_DIR:-${PROJECT_ROOT}/.clanker}"
-GLOBAL_SKILLS="${SCRIPT_DIR}/skills"
-SECRETS_DIR="${CLANKER_SECRETS_DIR:-${HOME}/.config/clanker/secrets}"
 CLANKER_CACHE="${CLANKER_CACHE:-${HOME}/.cache/clanker}"
+SECRETS_DIR="${CLANKER_SECRETS_DIR:-${HOME}/.config/clanker/secrets}"
+GLOBAL_SKILLS="${SCRIPT_DIR}/skills"
+SKILLS_DIR="${CLANKER_SKILLS_DIR:-${PROJECT_ROOT}/.clanker}"
+UNAME_S="$(uname -s)"
+
+# ─── Argument Parsing ────────────────────────────────────────
+START_PROXY=true
+STOP_PROXY_ON_EXIT=false
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --stop-proxy)   STOP_PROXY_ON_EXIT=true; START_PROXY=true; shift ;;
+        --no-proxy)     START_PROXY=false; shift ;;
+        --start-proxy)  START_PROXY=true; shift ;;
+        --version)      echo "clanker ${VERSION}"; exit 0 ;;
+        *)              break ;;
+    esac
+done
 
 # ─── Preflight ───────────────────────────────────────────────
+mkdir -p "${CLANKER_CACHE}/pip" "${CLANKER_CACHE}/npm" "${SECRETS_DIR}"
+
 if [[ ! -d "${PROJECT_ROOT}" ]]; then
     echo "Error: PROJECT_ROOT ${PROJECT_ROOT} does not exist" >&2
     exit 1
 fi
 
-if [[ ! -f "${PROJECT_ROOT}/.git" ]] && [[ ! -d "${PROJECT_ROOT}/.git" ]]; then
-    echo "Warning: Not a git repository. Proceeding anyway." >&2
-fi
+# Write container name for neovim plugin
+echo "$CONTAINER_NAME" > "${CLANKER_CACHE}/current-container"
+trap 'rm -f "${CLANKER_CACHE}/current-container"' EXIT
 
-# ─── Prepare mounts ──────────────────────────────────────────
-# Create host directories if they don't exist
-mkdir -p "${CLANKER_CACHE}/pip"
-mkdir -p "${CLANKER_CACHE}/npm"
-mkdir -p "${SECRETS_DIR}"
+# ─── Proxy Management (Platform-Specific) ────────────────────
+PROXY_SERVICE="com.clanker.provider-proxy"      # launchd label
+SYSTEMD_UNIT="clanker-proxy.service"            # systemd user unit
+PROXY_SOCKET_PATH="${CLANKER_PROVIDER_SOCKET:-${HOME}/.cache/clanker/provider.sock}"
+PROXY_TCP_PORT=11434
 
-# ─── Mount options ───────────────────────────────────────────
-# Add some basic Darwin support 
-
-if [[ "$(uname)" == "Darwin" ]]; then
-	MOUNT_OPTS="rw,delegated"
-else
-	MOUNT_OPTS="rw"
-fi
-
-MOUNTS=(
-    # Project: read-write so the agent can edit files
-    -v "${PROJECT_ROOT}:/workspace:${MOUNT_OPTS}"
-
-    # Package caches: persist between sessions
-    -v "${CLANKER_CACHE}/pip:/home/clanker/.cache/pip:rw"
-    -v "${CLANKER_CACHE}/npm:/home/clanker/.cache/npm:rw"
-
-    # Skills: project-specific override global
-    -v "${GLOBAL_SKILLS}:/etc/clanker/skills:ro"
-)
-
-# If project has .clanker/skills, mount it over the global skills
-if [[ -d "${SKILLS_DIR}/skills" ]]; then
-    MOUNTS+=(-v "${SKILLS_DIR}/skills:/workspace/.clanker/skills:ro")
-fi
-
-# If project has .clanker/config, mount it
-if [[ -f "${SKILLS_DIR}/config" ]]; then
-    MOUNTS+=(-v "${SKILLS_DIR}/config:/workspace/.clanker/config:ro")
-fi
-
-# If .venv exists on host shadow it with a container-local volume 
-if [[ -d "${PROJECT_ROOT}/.venv" ]]; then 
-	MOUNTS+=(-v "clanker-venv-$(basename ${PROJECT_ROOT}):/workspace/.venv")
-fi
-
-# ─── Secrets handling ────────────────────────────────────────
-# We never pass secrets via environment variables.
-# Instead, we mount a tmpfs with the provider key file.
-SECRET_MOUNT="--tmpfs /run/secrets:mode=0700,size=1M"
-
-# If a provider key exists on the host, copy it to a temp file and mount
-PROVIDER_KEY_FILE="${CLANKER_PROVIDER_KEY_FILE:-${SECRETS_DIR}/provider.key}"
-if [[ -f "${PROVIDER_KEY_FILE}" ]]; then
-    TMP_KEY="$(mktemp)"
-    trap "rm -f ${TMP_KEY}" EXIT
-    cp "${PROVIDER_KEY_FILE}" "${TMP_KEY}"
-    MOUNTS+=(-v "${TMP_KEY}:/run/secrets/provider.key:ro")
-fi
-
-# ─── Network ─────────────────────────────────────────────────
-# No network by default. The agent reaches the provider through
-# the socket proxy running on the host.
-
-# If a provider socket proxy is available, mount it
-PROVIDER_SOCKET="${CLANKER_PROVIDER_SOCKET:-${HOME}/.cache/clanker/provider.sock}"
-PROVIDER_SOCKET_DIR=$(dirname "${PROVIDER_SOCKET}")
-
-
-# Ensure the directory exists on the host 
-mkdir -p "${PROVIDER_SOCKET_DIR}"
-
-NETWORK=""
-SOCKET_MOUNT=""
-
-#if [[ "$UNAME_S" == "Darwin" ]]; then
-#	# On OSX use TCP to host.docker.internal
-#	NETWORK=""
-#	CLANKER_PROVIDER_MODE="tcp"
-#	CLANKER_PROVIDER_ENDPOINT="http://host.docker.internal:11434"
-#	CLANKER_PROVIDER_SOCKET=""
-#else
-#	# On linux use unix socker 
-#	NETWORK="--network none"
-#	if [[ -S "${PROVIDER_SOCKET}" ]]; then
-#		SOCKET_MOUNT="-v ${PROVIDER_SOCKET}:/var/run/provider.sock:rw"
-#		CLANKER_PROVIDER_MODE="socket"
-#		CLANKER_PROVIDER_SOCKET="/var/run/provider.sock"
-#		CLANKER_PROVIDER_ENDPOINT=""
-#	else
-#		CLANKER_PROVIDER_MODE="offline"
-#		CLANKER_PROVIDER_SOCKET=""
-#		CLANKER_PROVIDER_ENDPOINT=""
-#	fi
-#fi
-
-
-
-# Resolve real path (handles symlinks)
-SCRIPT_PATH="${BASH_SOURCE[0]}"
-while [ -L "${SCRIPT_PATH}" ]; do
-    SCRIPT_DIR="$(cd -P "$(dirname "${SCRIPT_PATH}")" >/dev/null 2>&1 && pwd)"
-    SCRIPT_PATH="$(readlink "${SCRIPT_PATH}")"
-    [[ ${SCRIPT_PATH} != /* ]] && SCRIPT_PATH="${SCRIPT_DIR}/${SCRIPT_PATH}"
-done
-SCRIPT_DIR="$(cd -P "$(dirname "${SCRIPT_PATH}")" >/dev/null 2>&1 && pwd)"
-
-# The proxy binary lives alongside the repo (built by make)
-PROXY_BINARY="${SCRIPT_DIR}/target/release/clanker-provider-proxy"
-
-
-# ─── Auto-start provider if proxy isn't running ──────────────
-PROXY_ENDPOINT="http://127.0.0.1:11434"
-
-check_proxy() {
-    curl -fsS --max-time 2 "${PROXY_ENDPOINT}/health" >/dev/null 2>&1
-}
-
-NETWORK=""
-SOCKET_MOUNT=""
-
-if [[ "$UNAME_S" == "Darwin" ]]; then 
-
-	if check_proxy; then
-		echo "  Provider: TCP proxy running"
-		CLANKER_PROVIDER_MODE="tcp"
-		CLANKER_PROVIDER_ENDPOINT="http://host.docker.internal:11434"
-	else
-		echo "  Provider: proxy not reachable. Attempting to start..."
-		# Optionally try to load the LaunchAgent if not already loaded
-		if ! launchctl list | grep -q "com.clanker.provider-proxy"; then
-			launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.clanker.provider-proxy.plist 2>/dev/null
-		fi
-		# Wait a moment for it to come up
-		sleep 5   # TODO: replace this with a loop
-		if check_proxy; then
-			echo "  Provider: TCP proxy started"
-			CLANKER_PROVIDER_MODE="tcp"
-			CLANKER_PROVIDER_ENDPOINT="http://host.docker.internal:11434"
-		else
-			echo "  Provider: OFFLINE (could not start proxy)"
-			CLANKER_PROVIDER_MODE="offline"
-			CLANKER_PROVIDER_ENDPOINT=""
-		fi
-	fi
-	CLANKER_PROVIDER_SOCKET=""
-else 
-	# Assume Linux for now 
-	if [[ -S "${PROVIDER_SOCKET}" ]]; then
-		CLANKER_PROVIDER_MODE="socket" 
-		CLANKER_PROVIDER_SOCKET="/var/run/provider.sock"
-	else
-		systemctl --user start clanker-proxy.service 2>/dev/null
-		sleep 0.5
-		if [[ -S "${PROVIDER_SOCKET}" ]]; then
-			CLANKER_PROVIDER_MODE="socket" 
-			CLANKER_PROVIDER_SOCKET="/var/run/provider.sock"
-		else
-			CLANKER_PROVIDER_MODE="offline"
-		fi
-	fi
-	CLANKER_PROVIDER_ENDPOINT=""
-fi
-
-echo "Using provider [${CLANKER_PROVIDER_MODE}] via ${CLANKER_PROVIDER_ENDPOINT} ${CLANKER_PROVIDER_SOCKET}" >&2
-
-
-# Service name
-PROXY_SERVICE="com.clanker.provider-proxy"   # For launchd
-# For systemd, use user unit name: clanker-proxy.service
-
-proxy_running() {
+proxy_health_check() {
     if [[ "$UNAME_S" == "Darwin" ]]; then
-        launchctl list | grep -q "$PROXY_SERVICE"
+        curl -fsS --max-time 2 "http://127.0.0.1:${PROXY_TCP_PORT}/health" >/dev/null 2>&1
     else
-        systemctl --user is-active --quiet clanker-proxy.service
+        [[ -S "$PROXY_SOCKET_PATH" ]]
     fi
 }
 
 proxy_start() {
     if [[ "$UNAME_S" == "Darwin" ]]; then
-        # If not loaded, bootstrap it
         launchctl list "$PROXY_SERVICE" >/dev/null 2>&1 || \
-            launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/$PROXY_SERVICE.plist
+            launchctl bootstrap gui/$(id -u) "$HOME/Library/LaunchAgents/${PROXY_SERVICE}.plist"
         launchctl kickstart -k gui/$(id -u)/$PROXY_SERVICE
     else
-        systemctl --user start clanker-proxy.service
+        systemctl --user start "$SYSTEMD_UNIT"
     fi
 }
 
@@ -240,144 +66,120 @@ proxy_stop() {
     if [[ "$UNAME_S" == "Darwin" ]]; then
         launchctl bootout gui/$(id -u)/$PROXY_SERVICE 2>/dev/null || true
     else
-        systemctl --user stop clanker-proxy.service
+        systemctl --user stop "$SYSTEMD_UNIT"
     fi
 }
 
-proxy_health_check() {
-    # Use curl to hit the health endpoint (TCP mode) or check socket
-    if [[ "$UNAME_S" == "Darwin" ]]; then
-        curl -fsS --max-time 2 "http://127.0.0.1:11434/health" >/dev/null 2>&1
-    else
-        # Check Unix socket existence (the service creates it)
-        [[ -S "${HOME}/.cache/clanker/provider.sock" ]]
-    fi
-}
+# Decide connection mode and ensure proxy is up
+if [[ "$UNAME_S" == "Darwin" ]]; then
+    CLANKER_PROVIDER_MODE="tcp"
+    CLANKER_PROVIDER_ENDPOINT="http://host.docker.internal:${PROXY_TCP_PORT}"
+    CLANKER_PROVIDER_SOCKET=""
+    NETWORK=""   # default bridge, host.docker.internal works
+    SOCKET_MOUNT=""
+else
+    CLANKER_PROVIDER_MODE="socket"
+    CLANKER_PROVIDER_SOCKET="/var/run/provider.sock"
+    CLANKER_PROVIDER_ENDPOINT=""
+    NETWORK="--network none"
+    SOCKET_MOUNT="-v ${PROXY_SOCKET_PATH}:${CLANKER_PROVIDER_SOCKET}:rw"
+fi
 
-# Default: start proxy if needed
-START_PROXY=true
-STOP_PROXY_ON_EXIT=false
-
-# Parse arguments
-while [[ $# -gt 0 ]]; do
-    case "$1" in
-        --stop-proxy)
-            STOP_PROXY_ON_EXIT=true
-            START_PROXY=true
-            shift
-            ;;
-        --no-proxy)
-            START_PROXY=false
-            shift
-            ;;
-        --start-proxy)
-            START_PROXY=true
-            shift
-            ;;
-        *)
-            break
-            ;;
-    esac
-done
-
-# Start proxy if requested and not already running
 if [[ "$START_PROXY" == true ]]; then
     if ! proxy_health_check; then
         echo "  Proxy not running. Starting service..."
         proxy_start
-        # Wait for health
-        for i in {1..10}; do
+        # Wait up to 5 seconds for health
+        for _ in {1..10}; do
             sleep 0.5
-            if proxy_health_check; then
-                echo "  Proxy is up."
-                break
-            fi
+            proxy_health_check && break
         done
         if ! proxy_health_check; then
             echo "  WARNING: Proxy failed to start. Agent will be offline." >&2
-            START_PROXY=false
+            CLANKER_PROVIDER_MODE="offline"
+            CLANKER_PROVIDER_SOCKET=""
+            CLANKER_PROVIDER_ENDPOINT=""
         fi
     else
         echo "  Proxy already running."
     fi
+elif [[ "$START_PROXY" == false ]]; then
+    CLANKER_PROVIDER_MODE="offline"
+    CLANKER_PROVIDER_SOCKET=""
+    CLANKER_PROVIDER_ENDPOINT=""
 fi
 
-# ... set up mounts, env, etc.
-# ─── Auto-start provider if proxy isn't running ──────────────
-# TODO: while testing on OSX don't try to autostart the proxy
-#if [[ ! -S "${CLANKER_PROVIDER_SOCKET}" ]]; then
-#	echo "Provider proxy not running, attempting to start..." >&2
-#
-#	if [[ -x "${PROXY_BINARY}" ]]; then 
-#		# Start in background
-#		nohup "${PROXY_BINARY}" > /dev/null 2>&1 & 
-#		PROXY_PID=$!
-#
-#		# Wait for socket to appear
-#		for i in {1..50}; do 
-#			if [[ -S "${CLANKER_PROVIDER_SOCKET}" ]]; then 
-#				echo "Provider proxy started with (PID ${PROXY_PID})" >&2 
-#				break
-#			fi 
-#			sleep 0.1
-#		done
-#
-#		if [[ -S "${CLANKER_PROVIDER_SOCKET}" ]]; then
-#			echo "ERROR: provider proxy failed to start" >&2
-#			echo "Run 'make build-proxy && make install' first" >&2
-#			exit 1
-#		fi
-#
-#	else
-#		echo "ERROR: provider proxy binary not found at ${PROXY_BINARY}" >&2 
-#		echo "Run 'make build-proxy' to compile it" >&2 
-#		exit 1
-#	fi
-#fi
-
-# ─── Build image if needed ───────────────────────────────────
-if [[ -z "$(docker images -q "${IMAGE_TAG}" 2>/dev/null)" ]]; then
-    echo "Building clanker image..." >&2
-    docker build -t "${IMAGE_TAG}" "${SCRIPT_DIR}"
+# ─── Mounts ─────────────────────────────────────────────────
+MOUNT_OPTS="rw"
+if [[ "$UNAME_S" == "Darwin" ]]; then
+    MOUNT_OPTS="rw,delegated"
 fi
 
+MOUNTS=(
+    -v "${PROJECT_ROOT}:/workspace:${MOUNT_OPTS}"
+    -v "${CLANKER_CACHE}/pip:/home/clanker/.cache/pip:rw"
+    -v "${CLANKER_CACHE}/npm:/home/clanker/.cache/npm:rw"
+    -v "${GLOBAL_SKILLS}:/etc/clanker/skills:ro"
+)
 
-# ─── Environment ─────────────────────────────────────────────
+# Project-specific skills
+if [[ -d "${SKILLS_DIR}/skills" ]]; then
+    MOUNTS+=(-v "${SKILLS_DIR}/skills:/workspace/.clanker/skills:ro")
+fi
+if [[ -f "${SKILLS_DIR}/config" ]]; then
+    MOUNTS+=(-v "${SKILLS_DIR}/config:/workspace/.clanker/config:ro")
+fi
+# Shadow .venv if present
+if [[ -d "${PROJECT_ROOT}/.venv" ]]; then
+    MOUNTS+=(-v "clanker-venv-$(basename "${PROJECT_ROOT}"):/workspace/.venv")
+fi
+
+# ─── Secrets (API Key) ───────────────────────────────────────
+SECRET_MOUNT="--tmpfs /run/secrets:mode=0700,size=1M"
+PROVIDER_KEY_FILE="${CLANKER_PROVIDER_KEY_FILE:-${SECRETS_DIR}/provider.key}"
+if [[ -f "${PROVIDER_KEY_FILE}" ]]; then
+    TMP_KEY="$(mktemp)"
+    trap 'rm -f "${TMP_KEY}"' EXIT
+    cp "${PROVIDER_KEY_FILE}" "${TMP_KEY}"
+    MOUNTS+=(-v "${TMP_KEY}:/run/secrets/provider.key:ro")
+fi
+
+# ─── Environment ────────────────────────────────────────────
 ENV_VARS=(
     -e CLANKER_PROVIDER="${CLANKER_PROVIDER:-deepseek}"
-	-e CLANKER_PROVIDER_MODE="${CLANKER_PROVIDER_MODE}"
-	-e CLANKER_PROVIDER_SOCKET="${CLANKER_PROVIDER_SOCKET}"
-	-e CLANKER_PROVIDER_ENDPOINT="${CLANKER_PROVIDER_ENDPOINT}"
+    -e CLANKER_PROVIDER_MODE="${CLANKER_PROVIDER_MODE}"
+    -e CLANKER_PROVIDER_SOCKET="${CLANKER_PROVIDER_SOCKET}"
+    -e CLANKER_PROVIDER_ENDPOINT="${CLANKER_PROVIDER_ENDPOINT}"
     -e CLANKER_MODEL="${CLANKER_MODEL:-deepseek-chat}"
     -e CLANKER_PROVIDER_KEY_FILE="/run/secrets/provider.key"
     -e CLANKER_PROJECT_NAME="$(basename "${PROJECT_ROOT}")"
     -e CLANKER_SESSION_ID="${CONTAINER_NAME}"
-    # Pass through terminal capabilities
+    -e CLANKER_UID="$(id -u)"
+    -e CLANKER_GID="$(id -g)"
     -e TERM="${TERM:-xterm-256color}"
     -e LINES="${LINES:-}"
     -e COLUMNS="${COLUMNS:-}"
-	-e CLANKER_UID="$(id -u)"
-    -e CLANKER_GID="$(id -g)"
 )
 
+# ─── Build Image if Needed ──────────────────────────────────
+if [[ -z "$(docker images -q "${IMAGE_TAG}" 2>/dev/null)" ]]; then
+    echo "Building clanker image..."
+    docker build -t "${IMAGE_TAG}" "${SCRIPT_DIR}"
+fi
 
-# ─── Launch ──────────────────────────────────────────────────
+# ─── Launch ─────────────────────────────────────────────────
 echo "╔══════════════════════════════════════════════════════════╗"
 echo "║  clanker - agent environment                             ║"
-echo "╠══════════════════════════════════════════════════════════╝"
-echo "║  Project: ${PROJECT_ROOT}                                "
-echo "║  Provider: ${CLANKER_PROVIDER:-deepseek}                 "
-echo "║  Model: ${CLANKER_MODEL:-deepseek-chat}                  "
-echo "║  Container: ${CONTAINER_NAME}                            "
-echo "║  Network: "
-echo "║    Mode:     ${CLANKER_PROVIDER_MODE}"
-echo "║    Socket:   ${CLANKER_PROVIDER_SOCKET}"
-echo "║    Endpoint: ${CLANKER_PROVIDER_ENDPOINT}"
-echo "║  Type 'exit' to leave, Ctrl-D to detach                  "
-echo "╚═══════════════════════════════════════════════════════════"
+echo "╠══════════════════════════════════════════════════════════╣"
+echo "║  Project:   ${PROJECT_ROOT}"
+echo "║  Provider:  ${CLANKER_PROVIDER:-deepseek}"
+echo "║  Model:     ${CLANKER_MODEL:-deepseek-chat}"
+echo "║  Mode:      ${CLANKER_PROVIDER_MODE}"
+echo "║  Socket:    ${CLANKER_PROVIDER_SOCKET}"
+echo "║  Endpoint:  ${CLANKER_PROVIDER_ENDPOINT}"
+echo "║  Container: ${CONTAINER_NAME}"
+echo "╚══════════════════════════════════════════════════════════╝"
 
-
-# Run container (do NOT use exec if we need cleanup)
 docker run \
     --rm \
     --name "${CONTAINER_NAME}" \
@@ -393,7 +195,6 @@ docker run \
 
 STATUS=$?
 
-# If requested, stop the proxy after session
 if [[ "$STOP_PROXY_ON_EXIT" == true ]] && [[ "$START_PROXY" == true ]]; then
     echo "  Stopping proxy service..."
     proxy_stop
