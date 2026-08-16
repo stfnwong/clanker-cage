@@ -1,9 +1,8 @@
 # docker.py
 import os
 import subprocess
-import shutil
 from pathlib import Path
-from typing import Optional, List, Dict
+
 from .config import Config
 from .session import Session
 
@@ -44,7 +43,7 @@ class DockerManager:
         except subprocess.CalledProcessError as e:
             raise RuntimeError(f"Docker build failed: {e}")
 
-    def _build_mount_args(self, session: Session) -> List[str]:
+    def _build_mount_args(self, session: Session) -> tuple[list[str], str | None]:
         """Construct the list of -v mount arguments for docker run."""
         cfg = self.config
         project_root = cfg.project_root
@@ -84,7 +83,7 @@ class DockerManager:
             mounts.append(f"{socket_host}:{cfg.provider_socket_container}:rw")
 
         # API key secret (tmpfs + temp file)
-        secret_tmp = None
+        secret_tmp: str | None = None
         key_file = Path(cfg.secrets_dir) / "provider.key"
         if key_file.exists():
             secret_tmp = self._create_tmp_key(key_file)
@@ -100,7 +99,7 @@ class DockerManager:
         tmp.close()
         return tmp.name
 
-    def _build_network_args(self) -> List[str]:
+    def _build_network_args(self) -> list[str]:
         """Return network-related docker run args."""
         cfg = self.config
         if cfg.provider_mode == "socket":
@@ -110,7 +109,7 @@ class DockerManager:
             # Default bridge network for TCP (macOS)
             return []
 
-    def _build_environment(self, session: Session, initial_prompt: Optional[str]) -> List[str]:
+    def _build_environment(self, session: Session, initial_prompt: str | None) -> list[str]:
         """Construct environment variables for the container."""
         cfg = self.config
         env = [
@@ -120,7 +119,7 @@ class DockerManager:
             f"CLANKER_PROVIDER_ENDPOINT={cfg.provider_endpoint}",
             f"CLANKER_MODEL={cfg.model}",
             "CLANKER_PROVIDER_KEY_FILE=/run/secrets/provider.key",
-            f"CLANKER_PROJECT_NAME={cfg.project_root.name}",
+            f"CLANKER_PROJECT_NAME={cfg.project_name}",
             f"CLANKER_SESSION_ID={session.session_id}",
             f"CLANKER_SESSION_DIR=/session",
             f"CLANKER_UID={os.getuid()}",
@@ -133,7 +132,7 @@ class DockerManager:
             env.append(f"CLANKER_INITIAL_PROMPT={initial_prompt}")
         return env
 
-    def run(self, session: Session, initial_prompt: Optional[str] = None) -> int:
+    def run(self, session: Session, initial_prompt: str | None = None) -> int:
         """
         Run the clanker container interactively.
 
