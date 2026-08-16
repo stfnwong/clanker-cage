@@ -29,5 +29,17 @@ def stop():
     """Stop the provider proxy service."""
     # proxy.stop()
 
+
+
+def get_initial_prompt(args):
+    if args.pipe:
+        return sys.stdin.read()
+    if args.prompt:
+        return args.prompt
+    if args.editor:
+        return open_editor_and_get_text()
+    return None  # no initial prompt, just drop into shell
+
+
 if __name__ == '__main__':
     cli()

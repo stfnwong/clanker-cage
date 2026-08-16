@@ -1,5 +1,7 @@
 from enum import Enum
-import platform
+from pathlib import Path
+
+from cli import platform
 
 
 class Platform(Enum):
@@ -36,3 +38,13 @@ class Config:
             self.proxy_socket_container: str = "/var/run/provider.sock"
             self.network: str = "--network none"
             self.socket_mount: str = f"-v {self.proxy_socket_host}:{self.proxy_socket_container}:rw"
+
+
+
+def find_repo_root():
+    current = Path(__file__).resolve().parent
+    for _ in range(5):
+        if (current / "docker").is_dir() and (current / "skills").is_dir():
+            return current
+        current = current.parent
+    raise RuntimeError("clanker repo root not found")
