@@ -18,6 +18,8 @@ where = ["."]
 
 [dependency-groups]
 dev = [
+    "ipython>=9.16.1",
+    "pudb>=2025.1.5",
     "pytest>=9.1.1",
 ]
 
