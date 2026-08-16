@@ -72,7 +72,7 @@ build-proxy: $(PROXY_BINARY)
 
 $(PROXY_BINARY): $(PROXY_SRC) Cargo.toml Cargo.lock
 	@echo "Building provider proxy for $(RUST_TARGET)..."
-	@cargo build --release
+	@cargo build --release -p clanker-provider-proxy
 
 
 # ─── Build ───────────────────────────────────────────────────

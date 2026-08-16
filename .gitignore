@@ -9,6 +9,10 @@ dist/
 wheels/
 *.egg-info
 
+# If there are venvs then ignore them
+.venv/
+venv/
+
 
 # Added by cargo
 
