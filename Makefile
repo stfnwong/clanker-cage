@@ -64,7 +64,7 @@ else
 endif
 
 
-PROXY_SRC := src/main.rs
+PROXY_SRC := crates/provider-proxy/src/main.rs
 PROXY_BINARY := target/release/clanker-provider-proxy
 
 .PHONY: build-proxy
