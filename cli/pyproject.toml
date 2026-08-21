@@ -9,6 +9,7 @@ dependencies = [
     "click>=8.1",
     "rich>=13.0",   # optional but nice
 ]
+requires-python = ">=3.12"
 
 [project.scripts]
 clanker = "clanker.cli:cli"

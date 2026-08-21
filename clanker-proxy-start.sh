@@ -8,5 +8,6 @@ else
     exit 1
 fi
 
+export CLANKER_PROXY_PORT=11434
 # Adjust path to your actual binary
-exec "$HOME/.local/bin/clanker-provider-proxy" --tcp --port 11434
+exec "$HOME/dev/agentic/clanker_cage/target/release/clanker-provider-proxy" --tcp --port $CLANKER_PROXY_PORT

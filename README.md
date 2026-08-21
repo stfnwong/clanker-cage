@@ -1,5 +1,7 @@
 # CLANKER CAGE
 
+![An example of an agent without clanker cage](docs/assets/clanker.jpg)
+
 Container image to hold an agent. 
 
 This repo is just a docker image that in which I want to run agents. The reason I want this is to be able to control agent access to other things on my laptop. For now this is specialised around `Claude` because thats what I have a subscription for but the idea would be to generalise this somewhat as time goes by.
@@ -114,10 +116,8 @@ The idea is that the container is a kind of throwaway sandbox in which we can co
 - The idea of `clanker` is that it gives a set of commands which put a new `clanker-cage` into the current project directory. So `cd to/where/project/is && clanker up && clanker attach` is the intended workflow.
 
 
-
 # Proxy setup
 Communication between the agent and container is proxied through a separate process. This is implemented as a long running process in a platform specific way. 
-
 
 ## On Linux 
 Copy `proxy/clanker-proxy.service` to somewhere like `~/.config/systemd/user/clanker-proxy.service`. Then do
@@ -125,7 +125,6 @@ Copy `proxy/clanker-proxy.service` to somewhere like `~/.config/systemd/user/cla
 ```bash
 systemctl --user enable --now clanker-proxy.service
 ```
-
 to manually start the service.
 
 
@@ -136,11 +135,8 @@ Copy `proxy/com.clanker.provider-proxy.plist`  to `~/Library/LaunchAgents/com.cl
 ```bash
 launchctl load ~/Library/LaunchAgents/com.clanker.provider-proxy.plist
 ```
-
 On newer OSX this might be 
 
 ```bash
 launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.clanker.provider-proxy.plist
 ```
-
-
