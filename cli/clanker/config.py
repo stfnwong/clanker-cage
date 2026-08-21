@@ -78,8 +78,10 @@ class Config:
         self.project_root: Path = Path(project_root).expanduser().resolve()
         self.image_tag: str = image_tag
         self.dockerfile_dir: Path = DOCKERFILE_DIR
-        self.model: str = model
-        self.provider: str = provider
+        self.model: str = os.environ.get("CLANKER_MODEL", None) or model
+        self.provider: str = os.environ.get("CLANKER_PROVIDER", None) or provider
+
+        self.provider_mode: str = "none"  # default here so that there is something to patch in test
 
         home = Path.home()
         self.cache_dir: Path = (

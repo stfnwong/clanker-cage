@@ -18,6 +18,10 @@ import urllib.request
 from pathlib import Path
 
 from clanker.config import Config, Platform
+from clanker.logger import make_logger 
+
+
+logger = make_logger(__name__)
 
 
 class ProxyManager:
@@ -65,16 +69,19 @@ class ProxyManager:
 
     def stop(self) -> None:
         """Stop the proxy. Never raises on failure (best-effort)."""
-        if self.config.platform == Platform.MACOS:
-            subprocess.run(
-                ["launchctl", "bootout", f"gui/{os.getuid()}/{self.config.proxy_service}"],
-                capture_output=True,
-            )
-        else:
-            subprocess.run(
-                ["systemctl", "--user", "stop", self.config.proxy_service],
-                capture_output=True,
-            )
+        try:
+            if self.config.platform == Platform.MACOS:
+                subprocess.run(
+                    ["launchctl", "bootout", f"gui/{os.getuid()}/{self.config.proxy_service}"],
+                    capture_output=True,
+                )
+            else:
+                subprocess.run(
+                    ["systemctl", "--user", "stop", self.config.proxy_service],
+                    capture_output=True,
+                )
+        except Exception as e:
+            logger.info(f"ProxyManager.stop() caught exception: {e}")
 
     # ── Internals ────────────────────────────────────────────
     def check_tcp(self) -> bool:
