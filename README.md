@@ -1,6 +1,6 @@
 # CLANKER CAGE
 
-![An example of an agent without clanker cage](docs/assets/clanker.png)
+![An example of an agent without clanker cage](/docs/assets/clanker.png)
 
 
 Container image to hold an agent. 
