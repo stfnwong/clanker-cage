@@ -40,6 +40,21 @@ TOOLS = [
     {
         "type": "function",
         "function": {
+            "name": "write_file",
+            "description": "Write content to a file in the workspace. Creates parent directories if needed. Overwrites existing content.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "Relative path from workspace root."},
+                    "content": {"type": "string", "description": "The full content to write."}
+                },
+                "required": ["path", "content"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "run_shell",
             "description": "Execute a shell command in the workspace. Returns stdout and stderr.",
             "parameters": {
