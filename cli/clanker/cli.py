@@ -18,6 +18,7 @@ but with durable, resumable sessions on top:
     clanker status                health + config summary
     clanker stop                  stop the provider proxy
 """
+
 from __future__ import annotations
 
 import sys
@@ -27,23 +28,32 @@ from typing import Optional
 import click
 
 from clanker import docker as docker_mod
-from clanker.config import Config, get_platform
+from clanker.config import (
+    Config, 
+    get_platform, 
+    DEFAULT_MODEL,
+    DEFAULT_PROVIDER
+)
 from clanker.platform import ProxyManager
 from clanker.session import Session
 
 
 # ─── Builders ─────────────────────────────────────────────────
-def _build_config(project: str, cache_dir: str | None = None,
-                  secrets_dir: str | None = None, model: str | None = None,
-                  provider: str | None = None) -> Config:
+def _build_config(
+    project: str, 
+    cache_dir: str | None = None,
+    secrets_dir: str | None = None, 
+    model: str=DEFAULT_MODEL,
+    provider: str=DEFAULT_PROVIDER
+) -> Config:
     """Construct a Config from CLI inputs + environment defaults."""
     return Config(
         platform=get_platform(),
         project_root=Path(project),
         cache_dir=Path(cache_dir) if cache_dir else None,
         secrets_dir=Path(secrets_dir) if secrets_dir else None,
-        model=model or None,
-        provider=provider or None,
+        model=model,
+        provider=provider,
     )
 
 
@@ -59,8 +69,8 @@ def _print_banner(cfg: Config, session: Session, proxy: ProxyManager,
     print(row("clanker", "agent environment"))
     print("╠" + "═" * 56 + "╣")
     print(row("Project:", str(cfg.project_root)))
-    print(row("Provider:", cfg.provider))
-    print(row("Model:", cfg.model))
+    print(row("Provider:", cfg.provider or "[No provider]"))
+    print(row("Model:", cfg.model or "[No model]"))
     print(row("Mode:", cfg.provider_mode))
     print(row("Session:", session.session_id))
     print(row("Container:", f"clanker-{session.session_id}"))
@@ -183,7 +193,11 @@ def cli() -> None:
 def run(project: str, no_proxy: bool, stop_proxy: bool,
         model: Optional[str], provider: Optional[str]) -> int:
     """Start a new interactive clanker session (default)."""
-    cfg = _build_config(project, model=model, provider=provider)
+    cfg = _build_config(
+        project, 
+        model=model or DEFAULT_MODEL, 
+        provider=provider or DEFAULT_PROVIDER
+    )
     session = Session.create(cfg.sessions_root, cfg.project_root,
                              model=cfg.model, provider=cfg.provider)
     return _launch(cfg, start_proxy=not no_proxy, stop_proxy=stop_proxy,
@@ -208,7 +222,12 @@ def prompt(project: str, no_proxy: bool, pipe: bool, editor: bool,
     if not text or not text.strip():
         click.echo("prompt: no text given (use --pipe, an argument, or -e)", err=True)
         return 2
-    cfg = _build_config(project, model=model, provider=provider)
+
+    cfg = _build_config(
+        project, 
+        model=model or DEFAULT_MODEL, 
+        provider=provider or DEFAULT_PROVIDER
+    )
     session = Session.create(cfg.sessions_root, cfg.project_root,
                              model=cfg.model, provider=cfg.provider)
     return _launch(cfg, start_proxy=not no_proxy, stop_proxy=False,
