@@ -68,11 +68,19 @@ def test_open_editor_returns_file_text(monkeypatch, tmp_path):
     # Build a tempfile.NamedTemporaryFile replacement that yields a real path
     import tempfile
 
+    def mock_tf(**kw):
+        f = mock.Mock()
+        f.name = str(tmp_path / "draft.md") 
+        return mock.Mock(
+            __enter__=mock.Mock(return_value=f),
+            __exit__=mock.Mock(return_value=False),
+        )
+
     real_tf = tempfile.NamedTemporaryFile
     monkeypatch.setattr(
         tempfile, "NamedTemporaryFile",
         lambda *a, **kw: (Path(tmp_path / "draft.md").write_text(payload)
-                          if (tmp_path / "draft.md") else None) or mock_tf(kw),
+                          if (tmp_path / "draft.md") else None) or mock_tf(**kw),
     )
     # Simpler: test via a stub subprocess that writes to the temp file.
     # Instead, create a real temp file via the actual mechanism.
@@ -89,8 +97,10 @@ def test_open_editor_returns_file_text(monkeypatch, tmp_path):
         created.append(p)
         f = mock.Mock()
         f.name = str(p)
-        return mock.Mock(__enter__=mock.Mock(return_value=f),
-                             __exit__=mock.Mock(return_value=False))
+        return mock.Mock(
+            __enter__=mock.Mock(return_value=f),
+            __exit__=mock.Mock(return_value=False)
+        )
     monkeypatch.setattr(tempfile, "NamedTemporaryFile", my_tf)
     monkeypatch.setattr("subprocess.run", fake_subprocess)
 
