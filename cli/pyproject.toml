@@ -8,6 +8,7 @@ version = "0.1.0"
 dependencies = [
     "click>=8.1",
     "rich>=13.0",   # optional but nice
+    "textual>=8.2.8",
 ]
 requires-python = ">=3.12"
 
