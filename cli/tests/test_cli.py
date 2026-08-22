@@ -89,7 +89,8 @@ def test_open_editor_returns_file_text(monkeypatch, tmp_path):
         created.append(p)
         f = mock.Mock()
         f.name = str(p)
-        return mock.Mock(__enter__=mock.Mock(return_value=f))
+        return mock.Mock(__enter__=mock.Mock(return_value=f),
+                             __exit__=mock.Mock(return_value=False))
     monkeypatch.setattr(tempfile, "NamedTemporaryFile", my_tf)
     monkeypatch.setattr("subprocess.run", fake_subprocess)
 

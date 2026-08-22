@@ -122,7 +122,7 @@ def test_render_text_truncates_long_content(tmp_path):
     s.append({"role": "assistant", "content": "x" * 5000})
     text = s.render_text()
     assert "... [truncated]" in text
-    assert len("x" * 5000) not in text  # assert marker-based truncation occurred
+    assert "x" * 5000 not in text  # assert marker-based truncation occurred
 
 
 def test_render_text_includes_tool_calls(tmp_path):

@@ -79,7 +79,7 @@ def test_macos_uses_tcp_mode_and_delegated_mount():
     [
         ("simple", "simple"),
         ("My.Project dir", "My_Project_dir"),
-        ("has/slash\\back", "has_slash_back"),
+        ("has\\slash\\back", "has_slash_back"),  # can't have '/' here because it looks like path sep
         ("with-mixed_2", "with-mixed_2"),
     ],
 )
