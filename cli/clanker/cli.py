@@ -147,6 +147,41 @@ def _launch(cfg: Config, *, start_proxy: bool, stop_proxy: bool,
             proxy.stop()
 
 
+# ─── Shared TUI launch sequence ───────────────────────────────
+def _launch_tui(cfg: Config, *, start_proxy: bool, stop_proxy: bool,
+                session: Session) -> int:
+    """Launch the textual TUI that *supplies the text buffer*.
+
+    Mirrors ``_launch`` lifecycle (proxy resolution, session-marking) but
+    dispatches to ``clanker.tui.app.run_tui`` instead of ``docker run -it
+    /bin/bash``.  The text buffer the user edits is therefore owned by the
+    TUI (``TextBuffer``), and each submitted line is run through the agent.
+    """
+    proxy, booted = _resolve_proxy(cfg, start=start_proxy)
+
+    cfg.ensure_dirs()
+    session.mkdir()
+
+    _print_banner(cfg, session, proxy, booted)
+
+    from clanker.tui import app as tui_app
+    try:
+        code = tui_app.run_tui(cfg, session, start_proxy=start_proxy,
+                               stop_proxy=stop_proxy)
+        if code == 0:
+            session.mark_finished()
+        else:
+            session.mark_failed(f"exit code {code}")
+        return code
+    except Exception as exc:
+        session.mark_failed(str(exc))
+        click.echo(f"error: {exc}", err=True)
+        return 1
+    finally:
+        if stop_proxy:
+            proxy.stop()
+
+
 # ─── Editor prompt helper ─────────────────────────────────────
 def _open_editor_and_get_text() -> Optional[str]:
     import subprocess
@@ -190,8 +225,11 @@ def cli() -> None:
 @click.option("--stop-proxy", is_flag=True, help="Stop the proxy after the session.")
 @click.option("--model", default=None, help="Override the default model.")
 @click.option("--provider", default=None, help="Override the default provider.")
+@click.option("--tui", is_flag=True,
+              help="Use the textual TUI to supply the prompt buffer instead of a shell.")
 def run(project: str, no_proxy: bool, stop_proxy: bool,
-        model: Optional[str], provider: Optional[str]) -> int:
+        model: Optional[str], provider: Optional[str],
+        tui: bool = False) -> int:
     """Start a new interactive clanker session (default)."""
     cfg = _build_config(
         project, 
@@ -200,6 +238,9 @@ def run(project: str, no_proxy: bool, stop_proxy: bool,
     )
     session = Session.create(cfg.sessions_root, cfg.project_root,
                              model=cfg.model, provider=cfg.provider)
+    if tui:
+        return _launch_tui(cfg, start_proxy=not no_proxy,
+                           stop_proxy=stop_proxy, session=session)
     return _launch(cfg, start_proxy=not no_proxy, stop_proxy=stop_proxy,
                    session=session)
 
@@ -239,8 +280,11 @@ def prompt(project: str, no_proxy: bool, pipe: bool, editor: bool,
 @click.option("--project", "-p", default=".", show_default=True)
 @click.option("--no-proxy", is_flag=True)
 @click.option("--stop-proxy", is_flag=True)
+@click.option("--tui", is_flag=True,
+              help="Use the textual TUI to supply the prompt buffer instead of a shell.")
 @click.argument("session_id")
-def resume(project: str, no_proxy: bool, stop_proxy: bool, session_id: str) -> int:
+def resume(project: str, no_proxy: bool, stop_proxy: bool, session_id: str,
+           tui: bool = False) -> int:
     """Resume an existing session."""
     cfg = _build_config(project)
     try:
@@ -253,6 +297,9 @@ def resume(project: str, no_proxy: bool, stop_proxy: bool, session_id: str) -> i
     if session.metadata.get("status") == "finished":
         click.echo(f"Session {session_id} already finished.", err=True)
         return 1
+    if tui:
+        return _launch_tui(cfg, start_proxy=not no_proxy,
+                           stop_proxy=stop_proxy, session=session)
     return _launch(cfg, start_proxy=not no_proxy, stop_proxy=stop_proxy,
                    session=session)
 
